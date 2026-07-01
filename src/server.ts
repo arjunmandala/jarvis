@@ -22,6 +22,10 @@ export function makeServer(config: Config): Hono {
     console.log(`[req] ${c.req.method} ${new URL(c.req.url).pathname} → ${c.res.status}`);
   });
 
+  // Sessions with a run currently executing — drop duplicate/echoed webhooks
+  // for the same session so runs can't stack or loop. (v1 in-memory guard.)
+  const inflight = new Set<string>();
+
   handler.on("AgentSessionEvent", async (payload: unknown) => {
     const action = (payload as { action?: string }).action;
     const ctx = extractContext(payload);
@@ -29,20 +33,39 @@ export function makeServer(config: Config): Hono {
     const acts = makeActivities(linear, ctx.agentSessionId);
     console.log(`[webhook] AgentSessionEvent action=${action} session=${ctx.agentSessionId} issue=${JSON.stringify(ctx.title)}`);
 
+    if (inflight.has(ctx.agentSessionId)) {
+      console.log(`[skip] ${ctx.agentSessionId} already processing — dropping ${action}`);
+      return;
+    }
+
     if (action === "created") {
+      inflight.add(ctx.agentSessionId);
       await acts.thought("On it — taking a look."); // 10s rule
       store.upsert(ctx.agentSessionId, "clarify", ctx.issueId);
-      void orchestrator.onCreated(ctx).catch((e) => {
-        console.error(`[error] onCreated ${ctx.agentSessionId}:`, e?.message ?? e);
-        acts.error(String(e?.message ?? e)).catch(() => undefined);
-      });
+      void orchestrator
+        .onCreated(ctx)
+        .catch((e) => {
+          console.error(`[error] onCreated ${ctx.agentSessionId}:`, e?.message ?? e);
+          acts.error(String(e?.message ?? e)).catch(() => undefined);
+        })
+        .finally(() => inflight.delete(ctx.agentSessionId));
     } else if (action === "prompted") {
       const reply = promptedBody(payload);
+      if (!reply.trim()) {
+        // Empty prompts (e.g. echoes of our own activities) would otherwise
+        // loop; ignore them. Dump the shape once so we can confirm the field.
+        console.log(`[webhook] prompted with EMPTY reply — ignoring. payload=${JSON.stringify(payload).slice(0, 400)}`);
+        return;
+      }
       console.log(`[webhook] prompted reply=${JSON.stringify(reply.slice(0, 80))}`);
-      void orchestrator.onPrompted(ctx, reply).catch((e) => {
-        console.error(`[error] onPrompted ${ctx.agentSessionId}:`, e?.message ?? e);
-        acts.error(String(e?.message ?? e)).catch(() => undefined);
-      });
+      inflight.add(ctx.agentSessionId);
+      void orchestrator
+        .onPrompted(ctx, reply)
+        .catch((e) => {
+          console.error(`[error] onPrompted ${ctx.agentSessionId}:`, e?.message ?? e);
+          acts.error(String(e?.message ?? e)).catch(() => undefined);
+        })
+        .finally(() => inflight.delete(ctx.agentSessionId));
     }
   });
 

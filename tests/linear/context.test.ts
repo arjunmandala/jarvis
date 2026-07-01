@@ -34,6 +34,12 @@ describe("extractContext", () => {
 });
 
 describe("promptedBody", () => {
+  it("reads agentActivity.content.body (real Linear shape)", () => {
+    expect(promptedBody({ action: "prompted", agentActivity: { content: { type: "prompt", body: "approve" } } })).toBe("approve");
+  });
+  it("returns empty when there is no reply text", () => {
+    expect(promptedBody({ action: "prompted", agentActivity: { content: {} } })).toBe("");
+  });
   it("reads agentActivity.body", () => {
     expect(promptedBody({ action: "prompted", agentActivity: { body: "approve" } })).toBe("approve");
   });

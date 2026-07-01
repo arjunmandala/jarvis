@@ -30,7 +30,11 @@ export function extractContext(payload: unknown): IssueContext {
 
 export function promptedBody(payload: unknown): string {
   const activity = asRecord(asRecord(payload).agentActivity);
-  return String(activity.body ?? "");
+  const content = asRecord(activity.content);
+  // Linear nests the user's reply under agentActivity.content.body; tolerate
+  // the flatter shapes too.
+  const raw = content.body ?? content.text ?? activity.body ?? activity.text ?? "";
+  return String(raw);
 }
 
 // ponytail: keyword heuristic. Ceiling: misreads "do not approve" etc.
