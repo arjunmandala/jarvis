@@ -1,6 +1,8 @@
 import { Sandbox, CommandExitError } from "e2b";
 import type { Config } from "../config.ts";
 import type { Activities } from "../linear/activities.ts";
+import { LineParser, type JarvisEvent } from "../agent/events.ts";
+import type { AgentTask } from "../agent/tasks.ts";
 
 export interface SandboxConfig {
   apiKey: string;
@@ -52,6 +54,50 @@ export async function runCommand(
     }
     throw err;
   }
+}
+
+export async function runAgent(
+  sbx: Sandbox,
+  anthropicApiKey: string,
+  task: AgentTask,
+  onEvent: (e: JarvisEvent) => void | Promise<void>,
+): Promise<{ result: JarvisEvent | null; exitCode: number }> {
+  const taskPath = "/tmp/jarvis-task.json";
+  await sbx.files.write(taskPath, JSON.stringify(task));
+
+  const parser = new LineParser();
+  let last: JarvisEvent | null = null;
+  const pending: Promise<unknown>[] = [];
+
+  const consume = (chunk: string) => {
+    for (const ev of parser.push(chunk)) {
+      if (ev.kind === "result" || ev.kind === "error") last = ev;
+      pending.push(Promise.resolve(onEvent(ev)));
+    }
+  };
+
+  let exitCode: number;
+  try {
+    const r = await sbx.commands.run("node /opt/jarvis-agent/runner.mjs", {
+      timeoutMs: 0, // long jobs: npm ci, test suites, agent runs
+      envs: { ANTHROPIC_API_KEY: anthropicApiKey, JARVIS_TASK_FILE: taskPath },
+      onStdout: consume,
+    });
+    exitCode = r.exitCode;
+  } catch (err) {
+    if (err instanceof CommandExitError) {
+      exitCode = err.exitCode;
+    } else {
+      throw err;
+    }
+  }
+
+  for (const ev of parser.flush()) {
+    if (ev.kind === "result" || ev.kind === "error") last = ev;
+    pending.push(Promise.resolve(onEvent(ev)));
+  }
+  await Promise.allSettled(pending);
+  return { result: last, exitCode };
 }
 
 // Phase 0 only. Proves the loop: clone → run one command → post result.
