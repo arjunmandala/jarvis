@@ -49,8 +49,10 @@ export function makeServer(config: Config): Hono {
       }),
     });
     const json = (await res.json()) as { access_token?: string };
-    console.log("LINEAR_ACCESS_TOKEN=", json.access_token); // copy into .env, then restart
-    return c.text("Token captured — check server logs, copy into .env, restart.");
+    console.log("OAuth token captured; returning in response");
+    return c.text(
+      `LINEAR_ACCESS_TOKEN=${json.access_token ?? "(no token in response)"}\n\nCopy this into your .env as LINEAR_ACCESS_TOKEN, then restart the server. This value is shown once and is not logged.`,
+    );
   });
 
   app.post("/webhook", async (c) => handler(c.req.raw)); // raw body unconsumed → signature verifies

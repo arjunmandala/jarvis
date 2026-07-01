@@ -25,12 +25,17 @@ export async function withSandbox<T>(cfg: SandboxConfig, fn: (sbx: Sandbox) => P
   }
 }
 
+export function redactSecret(text: string, secret: string): string {
+  if (!secret) return text;
+  return text.split(secret).join("***");
+}
+
 export async function cloneRepo(sbx: Sandbox, cfg: SandboxConfig): Promise<void> {
   // Token-in-URL clone of a private repo; GH_TOKEN is also set in env for gh.
   const url = `https://x-access-token:${cfg.ghToken}@github.com/${cfg.targetRepo}.git`;
   const res = await runCommand(sbx, `git clone ${url} ${REPO_DIR}`);
   if (res.exitCode !== 0) {
-    throw new Error(`git clone failed (${res.exitCode}): ${res.stderr}`);
+    throw new Error(redactSecret(`git clone failed (${res.exitCode}): ${res.stderr}`, cfg.ghToken));
   }
 }
 
