@@ -19,9 +19,11 @@ const PLAN_APPEND =
 
 const IMPLEMENT_APPEND =
   "You are Jarvis, an autonomous engineer. Use subagent-driven-development to implement the APPROVED plan, " +
-  "test-driven-development while coding, systematic-debugging on any failure, and requesting-code-review before finishing. " +
-  "Run the repo's tests and lint, start the app and curl the new behaviour to prove it works. " +
-  "When green, create a branch, commit, push, and open a PR with `gh pr create --fill`. " +
+  "test-driven-development while coding, and systematic-debugging on any failure. " +
+  "VERIFY before claiming success (verification-before-completion): run the repo's tests and lint, " +
+  "start the app and curl the new behaviour to prove it works; loop until everything is green. " +
+  "Then use requesting-code-review on the diff and fix what it finds. " +
+  "Finally create a branch, commit, push, and open a PR with `gh pr create --fill`. " +
   "Your FINAL message must be the PR URL.";
 
 function issueBlock(ctx: IssueContext): string {

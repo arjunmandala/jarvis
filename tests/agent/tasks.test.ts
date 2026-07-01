@@ -28,4 +28,12 @@ describe("implementTask", () => {
     expect(t.goal).toContain("## Plan");
     expect(t.goal).toMatch(/gh pr create/);
   });
+
+  it("directs explicit verification before the PR", () => {
+    const t = implementTask(ctx, "## Plan");
+    expect(t.systemAppend).toMatch(/tests/i);
+    expect(t.systemAppend).toMatch(/lint/i);
+    expect(t.systemAppend).toMatch(/curl/i);
+    expect(t.systemAppend).toMatch(/verification-before-completion/);
+  });
 });
