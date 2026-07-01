@@ -1,8 +1,10 @@
 import { Template } from "e2b";
+import { join } from "node:path";
 
 // Build with: node --env-file-if-exists=.env e2b/build-template.ts
-// Requires E2B_ACCESS_TOKEN (template builds) in env; E2B_API_KEY for runtime.
-const template = Template()
+// Requires E2B_API_KEY in env. Copy sources resolve within fileContextPath;
+// default is this script's dir (e2b/), so pin it to the repo root one level up.
+const template = Template({ fileContextPath: join(import.meta.dirname, "..") })
   .fromUbuntuImage("24.04")
   .setUser("root")
   .aptInstall(["curl", "git", "ca-certificates"])
@@ -26,5 +28,10 @@ const template = Template()
   .runCmd("chown -R user:user /home/user/.claude")
   .setUser("user");
 
-await Template.build(template, "jarvis-agent", { cpuCount: 2, memoryMB: 4096 });
-console.log("Built template: jarvis-agent");
+try {
+  await Template.build(template, "jarvis-agent", { cpuCount: 2, memoryMB: 4096 });
+  console.log("Built template: jarvis-agent");
+} catch (e) {
+  console.error(`Template build failed: ${e instanceof Error ? e.message : String(e)}`);
+  process.exit(1);
+}
