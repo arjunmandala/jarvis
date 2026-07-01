@@ -4,8 +4,8 @@ import type { Config } from "./config.ts";
 import { SessionStore } from "./store/sessions.ts";
 import { makeLinearClient } from "./linear/client.ts";
 import { makeActivities } from "./linear/activities.ts";
-import { extractContext, promptedBody, parseApproval } from "./linear/context.ts";
-import { runSkeleton } from "./sandbox/session.ts"; // Phase 0 uses a skeleton run; replaced in Phase 1+
+import { extractContext, promptedBody } from "./linear/context.ts";
+import { Orchestrator } from "./orchestrator/pipeline.ts";
 
 export function makeServer(config: Config): Hono {
   const app = new Hono();
@@ -13,22 +13,21 @@ export function makeServer(config: Config): Hono {
   const linear = makeLinearClient(config.linear.accessToken);
   const webhook = new LinearWebhookClient(config.linear.webhookSecret);
   const handler = webhook.createHandler();
+  const orchestrator = new Orchestrator(config, store, (id) => makeActivities(linear, id));
 
   handler.on("AgentSessionEvent", async (payload: unknown) => {
-    const p = payload as { action?: string };
-    if (p.action === "created") {
-      const ctx = extractContext(payload);
-      const acts = makeActivities(linear, ctx.agentSessionId);
-      // 10s rule: claim the session immediately.
-      await acts.thought("On it — taking a look at this issue.");
+    const action = (payload as { action?: string }).action;
+    const ctx = extractContext(payload);
+    if (!ctx.agentSessionId) return;
+    const acts = makeActivities(linear, ctx.agentSessionId);
+
+    if (action === "created") {
+      await acts.thought("On it — taking a look."); // 10s rule
       store.upsert(ctx.agentSessionId, "clarify", ctx.issueId);
-      // Fire-and-forget the slow work; do NOT await (keeps webhook ACK < 5s).
-      void runSkeletonPipeline(config, acts, ctx).catch(async (e) => {
-        await acts.error(`Pipeline failed: ${String(e?.message ?? e)}`).catch(() => undefined);
-      });
-    } else if (p.action === "prompted") {
-      // Phase 1+ resumes here on approval; Phase 0 ignores.
-      void parseApproval(promptedBody(payload));
+      void orchestrator.onCreated(ctx).catch((e) => acts.error(String(e?.message ?? e)).catch(() => undefined));
+    } else if (action === "prompted") {
+      const reply = promptedBody(payload);
+      void orchestrator.onPrompted(ctx, reply).catch((e) => acts.error(String(e?.message ?? e)).catch(() => undefined));
     }
   });
 
@@ -57,14 +56,4 @@ export function makeServer(config: Config): Hono {
   app.post("/webhook", async (c) => handler(c.req.raw)); // raw body unconsumed → signature verifies
 
   return app;
-}
-
-// Phase 0 skeleton: clone repo, run one command, post result. Replaced by the
-// real orchestrator in Phase 1+ (Task 1.x / orchestrator/pipeline.ts).
-async function runSkeletonPipeline(
-  config: Config,
-  acts: ReturnType<typeof makeActivities>,
-  ctx: ReturnType<typeof extractContext>,
-): Promise<void> {
-  await runSkeleton(config, acts);
 }

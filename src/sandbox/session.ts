@@ -1,6 +1,4 @@
 import { Sandbox, CommandExitError } from "e2b";
-import type { Config } from "../config.ts";
-import type { Activities } from "../linear/activities.ts";
 import { LineParser, type JarvisEvent } from "../agent/events.ts";
 import type { AgentTask } from "../agent/tasks.ts";
 
@@ -98,23 +96,4 @@ export async function runAgent(
   }
   await Promise.allSettled(pending);
   return { result: last, exitCode };
-}
-
-// Phase 0 only. Proves the loop: clone → run one command → post result.
-export async function runSkeleton(config: Config, acts: Activities): Promise<void> {
-  const sbxCfg = {
-    apiKey: config.e2bApiKey, template: config.e2bTemplate,
-    ghToken: config.ghToken, targetRepo: config.targetRepo,
-  };
-  await withSandbox(sbxCfg, async (sbx) => {
-    await acts.action("Cloning", config.targetRepo);
-    await cloneRepo(sbx, sbxCfg);
-    await acts.action("Running", "npm test");
-    const r = await runCommand(sbx, `cd ${REPO_DIR} && npm test`);
-    const status = r.exitCode === 0 ? "✅ passed" : `❌ exited ${r.exitCode}`;
-    await acts.response(
-      `Ran \`npm test\` in a fresh sandbox — ${status}.\n\n` +
-        "```\n" + (r.stdout || r.stderr).slice(-2000) + "\n```",
-    );
-  });
 }
