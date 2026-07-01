@@ -32,6 +32,8 @@ try {
         text: message.subtype === "success" ? message.result : null,
         costUsd: message.total_cost_usd ?? null,
         sessionId: message.session_id ?? null,
+        usage: message.usage ?? null,
+        numTurns: message.num_turns ?? null,
       });
     }
   }

@@ -26,9 +26,9 @@ describe("makeActivities", () => {
     expect(c.calls[4]).toEqual({ agentSessionId: "as_1", content: { type: "elicitation", body: "approve?" } });
   });
 
-  it("omits optional action fields when not provided", async () => {
+  it("defaults parameter to the action label when not provided (Linear requires a non-empty parameter)", async () => {
     const c = fakeClient();
     await makeActivities(c as any, "as_2").action("Searching");
-    expect(c.calls[0].content).toEqual({ type: "action", action: "Searching" });
+    expect(c.calls[0].content).toEqual({ type: "action", action: "Searching", parameter: "Searching" });
   });
 });

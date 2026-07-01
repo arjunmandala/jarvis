@@ -1,7 +1,20 @@
 export type JarvisEvent =
   | { kind: "assistant_text"; text: string }
   | { kind: "tool_use"; name: string; input: unknown }
-  | { kind: "result"; subtype: string; text: string | null; costUsd: number | null; sessionId: string | null }
+  | {
+      kind: "result";
+      subtype: string;
+      text: string | null;
+      costUsd: number | null;
+      sessionId: string | null;
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+      } | null;
+      numTurns?: number | null;
+    }
   | { kind: "error"; message: string };
 
 const KINDS = new Set(["assistant_text", "tool_use", "result", "error"]);

@@ -20,7 +20,8 @@ export function makeActivities(client: AgentClient, agentSessionId: string): Act
       create({
         type: "action",
         action,
-        ...(parameter !== undefined ? { parameter } : {}),
+        // Linear rejects action activities without a non-empty `parameter`.
+        parameter: parameter && parameter.trim() ? parameter : action,
         ...(result !== undefined ? { result } : {}),
       }),
     response: (body) => create({ type: "response", body }),
