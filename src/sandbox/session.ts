@@ -197,9 +197,11 @@ export async function runAgent(
   const taskPath = "/tmp/jarvis-task.json";
   // Sandbox reuse (e.g. map run then plan run in one sandbox) must not leak the
   // previous run's RESULT_FILE: clear it before starting a new runner so
-  // watchDetached can't win the race on stale data (an empty file parses to
-  // null via readResultFile).
-  await sbx.files.write(RESULT_FILE, "");
+  // watchDetached can't win the race on stale data. Must be `rm` via commands
+  // (same execution context as the runner) — e2b's files.write gets a 500
+  // "permission denied" overwriting a file the runner process wrote, even with
+  // matching ownership (verified live against the jarvis-agent template).
+  await sbx.commands.run(`rm -f ${RESULT_FILE}`, { timeoutMs: 60_000 });
   await sbx.files.write(taskPath, JSON.stringify(task));
 
   const parser = new LineParser();

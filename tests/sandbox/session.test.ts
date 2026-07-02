@@ -46,7 +46,13 @@ function makeFake(opts: {
       },
     },
     commands: {
-      run: async (_cmd: string, o: { onStdout?: (d: string) => void }) => {
+      run: async (cmd: string, o: { onStdout?: (d: string) => void }) => {
+        // runAgent clears the previous run's result with `rm -f` (e2b's
+        // files.write cannot overwrite a runner-written file). Mirror that.
+        if (cmd.startsWith("rm -f ")) {
+          files.delete(cmd.slice("rm -f ".length).trim());
+          return { exitCode: 0 };
+        }
         onStdout = o.onStdout;
         return runPromise;
       },
@@ -227,7 +233,7 @@ describe("runAgent supervision", () => {
     f.resolveRun({ exitCode: 0 });
     const out = await p;
 
-    expect(resultFileAtRunTime).toBe(""); // cleared before the runner was launched
+    expect(resultFileAtRunTime).toBeUndefined(); // removed before the runner was launched
     expect(out.result).toEqual(RESULT_EVENT); // not the stale prior-run result
   });
 
