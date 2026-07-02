@@ -11,13 +11,37 @@ export interface SandboxConfig {
 
 export const REPO_DIR = "/home/user/repo";
 
+// ponytail: retries ALL errors — no transient/permanent split. Upgrade path is an
+// error-classifier predicate if 4xx-style permanent failures cause noise. Matches the
+// Minor already accepted on the Linear-post retry (durable-runs phase) — keep consistent.
+export async function withRetries<T>(
+  label: string,
+  fn: () => Promise<T>,
+  opts?: { attempts?: number; baseDelayMs?: number },
+): Promise<T> {
+  const attempts = opts?.attempts ?? 3;
+  const baseDelayMs = opts?.baseDelayMs ?? 1000;
+  for (let n = 1; ; n++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[retry] ${label} attempt ${n}/${attempts} failed: ${message}`);
+      if (n >= attempts) throw err;
+      await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** (n - 1)));
+    }
+  }
+}
+
 export async function withSandbox<T>(cfg: SandboxConfig, fn: (sbx: Sandbox) => Promise<T>): Promise<T> {
-  const sbx = await Sandbox.create(cfg.template, {
-    apiKey: cfg.apiKey,
-    timeoutMs: 60 * 60 * 1000, // 1h; one sandbox per agent run
-    metadata: { app: "jarvis" },
-    envs: { GH_TOKEN: cfg.ghToken },
-  });
+  const sbx = await withRetries("sandbox.create", () =>
+    Sandbox.create(cfg.template, {
+      apiKey: cfg.apiKey,
+      timeoutMs: 60 * 60 * 1000, // 1h; one sandbox per agent run
+      metadata: { app: "jarvis" },
+      envs: { GH_TOKEN: cfg.ghToken },
+    }),
+  );
   try {
     return await fn(sbx);
   } finally {
@@ -33,10 +57,12 @@ export function redactSecret(text: string, secret: string): string {
 export async function cloneRepo(sbx: Sandbox, cfg: SandboxConfig): Promise<void> {
   // Token-in-URL clone of a private repo; GH_TOKEN is also set in env for gh.
   const url = `https://x-access-token:${cfg.ghToken}@github.com/${cfg.targetRepo}.git`;
-  const res = await runCommand(sbx, `git clone ${url} ${REPO_DIR}`);
-  if (res.exitCode !== 0) {
-    throw new Error(redactSecret(`git clone failed (${res.exitCode}): ${res.stderr}`, cfg.ghToken));
-  }
+  await withRetries("git clone", async () => {
+    const res = await runCommand(sbx, `git clone ${url} ${REPO_DIR}`);
+    if (res.exitCode !== 0) {
+      throw new Error(redactSecret(`git clone failed (${res.exitCode}): ${res.stderr}`, cfg.ghToken));
+    }
+  });
 }
 
 export async function runCommand(
