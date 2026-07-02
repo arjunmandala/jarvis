@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planTask, implementTask, mapTask } from "../../src/agent/tasks.ts";
+import { planTask, implementTask, mapTask, reviseTask } from "../../src/agent/tasks.ts";
 import type { IssueContext } from "../../src/linear/context.ts";
 
 const ctx: IssueContext = {
@@ -73,6 +73,42 @@ describe("planTask repo map injection", () => {
   it("is byte-identical to previous behavior when repoMap is absent", () => {
     const withoutArg = planTask(ctx);
     const withUndefined = planTask(ctx, undefined);
+    expect(withoutArg.goal).toBe(withUndefined.goal);
+    expect(withoutArg.goal).not.toMatch(/Repository map/);
+  });
+});
+
+describe("reviseTask", () => {
+  const previousPlan = "## Plan\n- do the thing";
+  const feedback = "please use approach B instead";
+
+  it("matches planTask's model/tools/budgets and reuses PLAN_APPEND byte-identically", () => {
+    const t = reviseTask(ctx, previousPlan, feedback);
+    const p = planTask(ctx);
+    expect(t.model).toBe(p.model);
+    expect(t.allowedTools).toEqual(p.allowedTools);
+    expect(t.maxTurns).toBe(p.maxTurns);
+    expect(t.maxBudgetUsd).toBe(p.maxBudgetUsd);
+    expect(t.cwd).toBe(p.cwd);
+    expect(t.systemAppend).toBe(p.systemAppend);
+  });
+
+  it("goal includes the feedback, the previous plan, and the issue title", () => {
+    const t = reviseTask(ctx, previousPlan, feedback);
+    expect(t.goal).toContain(feedback);
+    expect(t.goal).toContain(previousPlan);
+    expect(t.goal).toContain("Add /health");
+  });
+
+  it("injects the repo map into the goal when provided", () => {
+    const t = reviseTask(ctx, previousPlan, feedback, "MAP");
+    expect(t.goal).toContain("MAP");
+    expect(t.goal).toMatch(/Repository map/);
+  });
+
+  it("goal without repoMap is stable and has no repo-map header", () => {
+    const withoutArg = reviseTask(ctx, previousPlan, feedback);
+    const withUndefined = reviseTask(ctx, previousPlan, feedback, undefined);
     expect(withoutArg.goal).toBe(withUndefined.goal);
     expect(withoutArg.goal).not.toMatch(/Repository map/);
   });

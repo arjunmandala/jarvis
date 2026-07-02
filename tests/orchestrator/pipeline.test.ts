@@ -116,20 +116,10 @@ describe("onPrompted never goes silent", () => {
     store.close();
   });
 
-  // Elicitation, not thought — puts the session back into "awaiting input"
-  // instead of leaving it spinning as "working".
-  it("re-elicits on rejection and stays in await_approval", async () => {
-    const store = new SessionStore(":memory:");
-    store.upsert("as_p4", "await_approval", "iss");
-    store.setPlan("as_p4", "the plan");
-    const log: string[] = [];
-    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
-    await orch.onPrompted(ctxFor("as_p4"), "hold on, change the approach");
-    expect(log.length).toBe(1);
-    expect(log[0]).toMatch(/^elicitation:/);
-    expect(store.get("as_p4")?.phase).toBe("await_approval");
-    store.close();
-  });
+  // Non-approval, non-stop feedback now drives a plan-revision run inside
+  // withSandbox (clone + runAgent), same as onCreated's plan run — there's no
+  // seam to fake e2b here, so this path is covered by live acceptance, not a
+  // unit test (matches the repo's convention for withSandbox/e2b paths).
 });
 
 describe("onPrompted plan recovery from Linear", () => {

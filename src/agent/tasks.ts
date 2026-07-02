@@ -68,6 +68,23 @@ export function planTask(ctx: IssueContext, repoMap?: string): AgentTask {
   };
 }
 
+export function reviseTask(ctx: IssueContext, previousPlan: string, feedback: string, repoMap?: string): AgentTask {
+  return {
+    goal:
+      `Revise the plan below according to the human's feedback. Apply the feedback faithfully and keep ` +
+      `everything the feedback doesn't touch. Re-check the repo where the feedback changes assumptions. ` +
+      `Your FINAL message must be the complete revised plan in Markdown — that text is returned verbatim to ` +
+      `the human for approval.\n\n` +
+      `Feedback:\n${feedback}\n\n---\nPrevious plan:\n${previousPlan}\n\n---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}`,
+    cwd: REPO_DIR,
+    model: "claude-sonnet-5",
+    systemAppend: PLAN_APPEND,
+    allowedTools: ["Read", "Glob", "Grep", "Skill"],
+    maxTurns: 40,
+    maxBudgetUsd: 2,
+  };
+}
+
 export function implementTask(ctx: IssueContext, approvedPlan: string, repoMap?: string): AgentTask {
   return {
     goal:

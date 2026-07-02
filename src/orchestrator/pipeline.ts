@@ -5,7 +5,7 @@ import type { IssueContext } from "../linear/context.ts";
 import { APPROVAL_FOOTER } from "../linear/context.ts";
 import { withSandbox, cloneRepo, runAgent, watchDetached, type AgentSandbox } from "../sandbox/session.ts";
 import { Sandbox } from "e2b";
-import { planTask, implementTask, mapTask } from "../agent/tasks.ts";
+import { planTask, implementTask, mapTask, reviseTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
 
 // Phase 4.1: surface the run's dollar cost inline in the Linear activity when
@@ -204,24 +204,39 @@ export class Orchestrator {
       }
       return;
     }
-    if (!approved) {
-      console.log(`[phase] ${ctx.agentSessionId} reply parsed as NOT approval — staying in await_approval`);
-      // Elicitation puts the session back into "awaiting input" instead of "working".
-      await acts.elicitation("Understood — not implementing yet. Reply 'approve' when ready, or 'stop' to cancel.");
-      return;
-    }
+    // Hoisted above the approved/not-approved branch: both the revision path
+    // (feedback) and the implement path (approved) need the current plan.
     let plan = row.plan;
     if (!plan || !plan.trim()) {
       plan = await recoverPlan(this.#store, ctx.agentSessionId, this.#fetchPlan);
     }
     if (!plan || !plan.trim()) {
-      console.error(`[phase] ${ctx.agentSessionId} approved but plan is missing — refusing to implement blind`);
+      console.error(`[phase] ${ctx.agentSessionId} plan is missing — refusing to proceed blind`);
       await this.#failLoud(
         ctx.agentSessionId, acts,
         "I lost the plan for this session (likely a restart before it was saved). Re-assign the issue and I'll plan again.",
       );
       return;
     }
+
+    if (!approved) {
+      console.log(`[phase] ${ctx.agentSessionId} reply parsed as feedback — revising the plan`);
+      // Same phase as the original plan run so boot reconciliation recovers a
+      // revision run exactly like a plan run (re-attaches, calls #finishPlan).
+      this.#store.setPhase(ctx.agentSessionId, "plan");
+      await acts.thought("Revising the plan per your feedback…");
+
+      const map = this.#store.getRepoMap(this.#config.targetRepo);
+      const { result } = await withSandbox(this.#sbxCfg(), async (sbx) => {
+        this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
+        await cloneRepo(sbx, this.#sbxCfg());
+        return runAgent(sbx, this.#config.anthropicApiKey, reviseTask(ctx, plan, replyText, map), this.#relay(acts));
+      });
+
+      await this.#finishPlan(ctx.agentSessionId, acts, result);
+      return;
+    }
+
     this.#store.setPhase(ctx.agentSessionId, "implement");
     console.log(`[phase] ${ctx.agentSessionId} → implement (approved)`);
     await acts.thought("Approved — implementing in a sandbox now.");
