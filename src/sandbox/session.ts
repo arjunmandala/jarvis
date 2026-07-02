@@ -59,8 +59,111 @@ export async function runCommand(
   }
 }
 
+// The in-sandbox runner writes its final result/error event here before emitting
+// it on stdout (Task 1). This file is the authoritative record; the stream is
+// telemetry that can go half-open and hang. See runAgent / watchDetached.
+export const RESULT_FILE = "/tmp/jarvis-result.json";
+
+// Narrow structural type so tests can fake a sandbox without e2b. The real e2b
+// Sandbox structurally satisfies this.
+export interface AgentSandbox {
+  // write's return is widened to unknown so the real e2b Sandbox (Promise<WriteInfo>)
+  // structurally satisfies this interface.
+  files: { read(path: string): Promise<string>; write(path: string, data: string): Promise<unknown> };
+  commands: {
+    run(cmd: string, opts: object): Promise<{ exitCode: number }>;
+    list(): Promise<{ cmd: string; args: string[] }[]>;
+  };
+}
+
+/** Read RESULT_FILE and return it only if it parses to a result|error event; null otherwise. */
+export async function readResultFile(sbx: AgentSandbox): Promise<JarvisEvent | null> {
+  let raw: string;
+  try {
+    raw = await sbx.files.read(RESULT_FILE);
+  } catch {
+    return null; // missing / unreadable
+  }
+  try {
+    const obj = JSON.parse(raw) as unknown;
+    if (
+      obj &&
+      typeof obj === "object" &&
+      ((obj as { kind?: unknown }).kind === "result" || (obj as { kind?: unknown }).kind === "error")
+    ) {
+      return obj as JarvisEvent;
+    }
+  } catch {
+    // non-JSON
+  }
+  return null;
+}
+
+export interface WatchOpts {
+  pollMs?: number;
+  deadlineMs?: number;
+  signal?: AbortSignal;
+}
+
+/** Abortable sleep that clears its timer and settles promptly on abort. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const timer = setTimeout(done, ms);
+    const onAbort = () => done();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }
+  });
+}
+
+function runnerAlive(procs: { cmd: string; args: string[] }[]): boolean {
+  return procs.some((p) => {
+    const hay = [p.cmd, ...(p.args ?? [])].join(" ");
+    return hay.includes("runner.mjs");
+  });
+}
+
+/**
+ * Poll RESULT_FILE (the authoritative record) until it appears, the runner
+ * process disappears, the deadline passes, or the signal aborts. Usable
+ * standalone to re-attach to a sandbox after a host restart — no stream needed.
+ */
+export async function watchDetached(sbx: AgentSandbox, opts: WatchOpts = {}): Promise<JarvisEvent | null> {
+  const pollMs = opts.pollMs ?? 30_000;
+  const deadlineMs = opts.deadlineMs ?? 55 * 60_000;
+  const signal = opts.signal;
+  const start = Date.now();
+  let transient = 0;
+
+  while (!signal?.aborted) {
+    try {
+      const fromFile = await readResultFile(sbx);
+      if (fromFile) return fromFile;
+
+      const procs = await sbx.commands.list();
+      if (!runnerAlive(procs)) {
+        // Runner is gone: grace-wait one tick, then one final read (may be null).
+        await sleep(pollMs, signal);
+        return await readResultFile(sbx);
+      }
+      transient = 0;
+    } catch {
+      if (++transient >= 3) return null;
+    }
+
+    if (Date.now() - start >= deadlineMs) return null;
+    await sleep(pollMs, signal);
+    if (Date.now() - start >= deadlineMs) return null;
+  }
+  return null;
+}
+
 export async function runAgent(
-  sbx: Sandbox,
+  sbx: AgentSandbox,
   anthropicApiKey: string,
   task: AgentTask,
   onEvent: (e: JarvisEvent) => void | Promise<void>,
@@ -79,26 +182,61 @@ export async function runAgent(
     }
   };
 
-  let exitCode: number;
-  try {
-    const r = await sbx.commands.run("node /opt/jarvis-agent/runner.mjs", {
+  // Start the stream but don't await it directly: a half-open stdout can hang
+  // forever. Resolve on normal/CommandExitError exit; leave other errors to reject.
+  let streamFinished = false;
+  const streamEnd: Promise<number> = sbx.commands
+    .run("node /opt/jarvis-agent/runner.mjs", {
       timeoutMs: 0, // long jobs: npm ci, test suites, agent runs
       envs: { ANTHROPIC_API_KEY: anthropicApiKey, JARVIS_TASK_FILE: taskPath },
       onStdout: consume,
-    });
-    exitCode = r.exitCode;
-  } catch (err) {
-    if (err instanceof CommandExitError) {
-      exitCode = err.exitCode;
-    } else {
-      throw err;
-    }
-  }
+    })
+    .then(
+      (r) => {
+        streamFinished = true;
+        return r.exitCode;
+      },
+      (err) => {
+        if (err instanceof CommandExitError) {
+          streamFinished = true;
+          return err.exitCode;
+        }
+        throw err;
+      },
+    );
 
+  // Supervise: whichever settles first wins; the loser is aborted.
+  const ac = new AbortController();
+  const watcher = watchDetached(sbx, { signal: ac.signal });
+
+  const streamRace = streamEnd.then((exitCode) => ({ from: "stream" as const, exitCode }));
+  // Don't let the abandoned stream promise reject unhandled if the watcher wins
+  // and the stream later rejects (non-CommandExitError).
+  streamEnd.catch(() => {});
+  streamRace.catch(() => {});
+
+  const winner = await Promise.race([
+    streamRace,
+    watcher.then((event) => ({ from: "watch" as const, event })),
+  ]);
+
+  ac.abort(); // cancel the watcher's sleep if the stream won
+  const watcherEvent = winner.from === "watch" ? winner.event : await watcher.catch(() => null);
+
+  // Flush any buffered trailing line from the stream.
   for (const ev of parser.flush()) {
     if (ev.kind === "result" || ev.kind === "error") last = ev;
     pending.push(Promise.resolve(onEvent(ev)));
   }
   await Promise.allSettled(pending);
-  return { result: last, exitCode };
+
+  // Precedence: stream's own result/error event, else RESULT_FILE, else watcher's.
+  let result: JarvisEvent | null = last;
+  if (!result) result = await readResultFile(sbx);
+  if (!result) result = watcherEvent;
+
+  // exitCode is the stream's if it finished, else -1 (stream never settled).
+  const exitCode = streamFinished ? await streamEnd : -1;
+
+  return { result, exitCode };
 }
