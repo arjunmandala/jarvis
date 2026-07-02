@@ -23,6 +23,21 @@ body — copy that value into `.env` as `LINEAR_ACCESS_TOKEN` and restart the
 server. The token is never written to the server logs, so this response page
 is the only place you can retrieve it.
 
+## Deploying runner changes
+
+`src/agent/runner.mjs` executes inside the E2B sandbox, baked into the
+`jarvis-agent` template — the host never uploads it at runtime. **Any change to
+runner.mjs requires rebuilding the template before (re)starting the host:**
+
+```bash
+node --env-file-if-exists=.env e2b/build-template.ts
+```
+
+Until the rebuild ships, sandboxes run the old runner. In particular, the
+durable-runs recovery path (boot reconciliation reading `/tmp/jarvis-result.json`)
+is inert with an old-template runner: interrupted sessions fail loud
+("re-assign to retry") instead of recovering.
+
 ## Development
 
 ```bash

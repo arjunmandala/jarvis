@@ -232,6 +232,9 @@ export class Orchestrator {
   // Boot reconciliation: on startup, no in-flight session should be left hanging.
   // For every row still in a run phase (plan/implement), either recover it by
   // re-attaching to its sandbox, or fail it loud so the human can re-assign.
+  // Race note: a `prompted` webhook arriving while a session is being reconciled
+  // cannot double-run it — onPrompted only acts in phase await_approval, and
+  // reconciled rows are in plan/implement until #finish* moves them.
   async reconcile(): Promise<void> {
     const rows = this.#store.listByPhase("plan", "implement");
     if (rows.length === 0) return;
