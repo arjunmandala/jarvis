@@ -7,7 +7,7 @@ import { join } from "node:path";
 const template = Template({ fileContextPath: join(import.meta.dirname, "..") })
   .fromUbuntuImage("24.04")
   .setUser("root")
-  .aptInstall(["curl", "git", "ca-certificates"])
+  .aptInstall(["curl", "git", "ca-certificates", "python3", "python3-venv", "python3-pip"])
   // Node 24 (NodeSource) + gh (GitHub apt repo) — baked so cold sandboxes are ready.
   .runCmd("curl -fsSL https://deb.nodesource.com/setup_24.x | bash -")
   .aptInstall(["nodejs"])
@@ -20,7 +20,7 @@ const template = Template({ fileContextPath: join(import.meta.dirname, "..") })
   .aptInstall(["gh"])
   // In-sandbox Agent SDK + runner under /opt/jarvis-agent
   .makeDir("/opt/jarvis-agent")
-  .runCmd("cd /opt/jarvis-agent && npm init -y && npm i @anthropic-ai/claude-agent-sdk@^0.3.197")
+  .runCmd("cd /opt/jarvis-agent && npm init -y && npm i @anthropic-ai/claude-agent-sdk@^0.3.197 zod@^4")
   .copy("src/agent/runner.mjs", "/opt/jarvis-agent/runner.mjs")
   // superpowers skills available to the agent as a user setting source
   .makeDir("/home/user/.claude/skills")
