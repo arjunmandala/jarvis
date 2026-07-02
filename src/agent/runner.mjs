@@ -82,7 +82,13 @@ async function* promptStream() {
       yield userMsg(steering.shift());
       continue;
     }
-    if (turnDone) return;
+    if (turnDone) {
+      // Final drain: the 2s pump may not have scanned a comment that landed in
+      // the last moments of the turn — read the file directly before closing.
+      for (const t of readNewLines()) steering.push(t);
+      if (steering.length > 0) continue;
+      return;
+    }
     await sleep(500);
   }
 }
