@@ -1,9 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   RESULT_FILE,
+  INBOX_FILE,
   readResultFile,
   watchDetached,
   runAgent,
+  injectMessage,
   type AgentSandbox,
 } from "../../src/sandbox/session.ts";
 import type { JarvisEvent } from "../../src/agent/events.ts";
@@ -26,6 +28,7 @@ function makeFake(opts: {
 } = {}) {
   const files = new Map<string, string>(Object.entries(opts.files ?? {}));
   let processes = opts.processes ?? [{ cmd: "node", args: ["/opt/jarvis-agent/runner.mjs"] }];
+  const commandLog: string[] = [];
 
   let onStdout: ((d: string) => void) | undefined;
   let resolveRun!: (v: { exitCode: number }) => void;
@@ -47,10 +50,11 @@ function makeFake(opts: {
     },
     commands: {
       run: async (cmd: string, o: { onStdout?: (d: string) => void }) => {
+        commandLog.push(cmd);
         // runAgent clears the previous run's result with `rm -f` (e2b's
         // files.write cannot overwrite a runner-written file). Mirror that.
         if (cmd.startsWith("rm -f ")) {
-          files.delete(cmd.slice("rm -f ".length).trim());
+          for (const p of cmd.slice("rm -f ".length).trim().split(/\s+/)) files.delete(p);
           return { exitCode: 0 };
         }
         onStdout = o.onStdout;
@@ -62,6 +66,7 @@ function makeFake(opts: {
 
   return {
     sbx,
+    commandLog,
     setFile: (path: string, data: string) => files.set(path, data),
     setProcesses: (p: { cmd: string; args: string[] }[]) => {
       processes = p;
@@ -249,5 +254,54 @@ describe("runAgent supervision", () => {
     // stream produced no result event, so readResultFile supplies it
     expect(out.result).toEqual(RESULT_EVENT);
     expect(out.exitCode).toBe(3);
+  });
+});
+
+describe("injectMessage", () => {
+  it("appends a base64-encoded JSONL line to the inbox", async () => {
+    const commandLog: string[] = [];
+    const sbx: AgentSandbox = {
+      files: { read: async () => { throw new Error("ENOENT"); }, write: async () => undefined },
+      commands: {
+        run: async (cmd: string) => { commandLog.push(cmd); return { exitCode: 0 }; },
+        list: async () => [],
+      },
+    };
+    await injectMessage(sbx, 'use approach "B" — it\'s better\nthanks');
+    expect(commandLog).toHaveLength(1);
+    const m = commandLog[0].match(/^echo (\S+) \| base64 -d >> \/tmp\/jarvis-inbox\.jsonl$/);
+    expect(m).toBeTruthy();
+    const decoded = JSON.parse(Buffer.from(m![1], "base64").toString("utf8"));
+    expect(decoded.text).toBe('use approach "B" — it\'s better\nthanks');
+  });
+});
+
+describe("runAgent inbox clearing", () => {
+  it("clears both result and inbox files before starting the runner", async () => {
+    const commandLog: string[] = [];
+    const files = new Map<string, string>();
+    const resultLine = JSON.stringify(RESULT_EVENT) + "\n";
+    const sbx: AgentSandbox = {
+      files: {
+        read: async (p: string) => {
+          if (!files.has(p)) throw new Error("ENOENT");
+          return files.get(p)!;
+        },
+        write: async (p: string, d: string) => void files.set(p, d),
+      },
+      commands: {
+        run: async (cmd: string, o: { onStdout?: (d: string) => void }) => {
+          commandLog.push(cmd);
+          if (cmd.startsWith("rm -f ")) return { exitCode: 0 };
+          o.onStdout?.(resultLine); // runner emits its result and exits
+          return { exitCode: 0 };
+        },
+        list: async () => [],
+      },
+    };
+    const task = { goal: "g", cwd: "/r", model: "m", systemAppend: "", allowedTools: [], maxTurns: 1, maxBudgetUsd: 1 } as AgentTask;
+    const { result } = await runAgent(sbx, "key", task, () => undefined);
+    expect(result?.kind).toBe("result");
+    expect(commandLog[0]).toBe(`rm -f ${RESULT_FILE} ${INBOX_FILE}`);
   });
 });
