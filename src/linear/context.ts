@@ -51,3 +51,12 @@ export function parseApproval(text: string): boolean {
   if (SOFT_NEGATE.test(text)) return false;
   return SOFT_AFFIRM.test(text);
 }
+
+// "stop"/"cancel" while awaiting approval closes the session for good
+// (rejections like "hold on" merely keep it waiting).
+const STOP = /\b(stop|cancel|abort|never\s?mind)\b/i;
+const STOP_NEGATED = /\b(?:don'?t|do\s*not)\s+(?:stop|cancel|abort)/i;
+
+export function parseStop(text: string): boolean {
+  return STOP.test(text) && !STOP_NEGATED.test(text);
+}

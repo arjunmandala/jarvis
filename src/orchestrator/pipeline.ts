@@ -117,18 +117,30 @@ export class Orchestrator {
     const acts = this.#makeActs(ctx.agentSessionId);
     const row = this.#store.get(ctx.agentSessionId);
     if (!row || row.phase !== "await_approval") {
+      // Terminal activities only — a `thought` would leave Linear stuck on "working".
       const phase = row?.phase ?? "unknown";
       console.log(`[skip] ${ctx.agentSessionId} prompted but phase=${phase} — replying with status`);
-      await acts.thought(
-        `This session is in state \`${phase}\`, so I can't act on that reply. ` +
-          `To start over, re-assign the issue to me.`,
-      );
+      if (phase === "done") {
+        await acts.response("This task is already done — re-assign the issue to start something new.");
+      } else {
+        await acts.error(
+          `This session is in state \`${phase}\` and can't continue (it was likely interrupted). ` +
+            `Re-assign the issue to me to start over.`,
+        );
+      }
       return;
     }
     const approved = parseApprovalGate(replyText);
+    if (!approved && parseStopGate(replyText)) {
+      console.log(`[phase] ${ctx.agentSessionId} stop requested — closing session`);
+      await acts.response("Stopped. Re-assign the issue when you want me to plan again.");
+      this.#store.setPhase(ctx.agentSessionId, "done");
+      return;
+    }
     if (!approved) {
       console.log(`[phase] ${ctx.agentSessionId} reply parsed as NOT approval — staying in await_approval`);
-      await acts.thought("Understood — not implementing yet. Tell me to 'approve' when ready.");
+      // Elicitation puts the session back into "awaiting input" instead of "working".
+      await acts.elicitation("Understood — not implementing yet. Reply 'approve' when ready, or 'stop' to cancel.");
       return;
     }
     const plan = row.plan;
@@ -163,4 +175,4 @@ export class Orchestrator {
 }
 
 // re-export from context to avoid a circular import in tests
-import { parseApproval as parseApprovalGate } from "../linear/context.ts";
+import { parseApproval as parseApprovalGate, parseStop as parseStopGate } from "../linear/context.ts";

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractContext, promptedBody, parseApproval } from "../../src/linear/context.ts";
+import { extractContext, promptedBody, parseApproval, parseStop } from "../../src/linear/context.ts";
 
 describe("extractContext", () => {
   it("pulls issue + comment + promptContext", () => {
@@ -64,4 +64,15 @@ describe("parseApproval", () => {
     "do not approve this",
     "don't approve yet",
   ])("treats %s as not-approval", (t) => expect(parseApproval(t)).toBe(false));
+});
+
+describe("parseStop", () => {
+  it.each(["stop", "STOP", "cancel this", "abort", "never mind", "nevermind"])(
+    "treats %s as stop",
+    (t) => expect(parseStop(t)).toBe(true),
+  );
+  it.each(["approve", "don't stop", "hold on", "change the approach"])(
+    "treats %s as not-stop",
+    (t) => expect(parseStop(t)).toBe(false),
+  );
 });

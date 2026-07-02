@@ -57,25 +57,51 @@ function ctxFor(id: string): IssueContext {
 }
 
 describe("onPrompted never goes silent", () => {
-  it("posts a thought when session phase is not await_approval", async () => {
+  // Terminal activity (error/response), NOT thought — a thought leaves the
+  // Linear session stuck in "working".
+  it("posts a terminal error when session phase is not await_approval", async () => {
     const store = new SessionStore(":memory:");
-    store.upsert("as_p1", "error", "iss");
+    store.upsert("as_p1", "plan", "iss");
     const log: string[] = [];
     const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
     await orch.onPrompted(ctxFor("as_p1"), "approve");
     expect(log.length).toBe(1);
-    expect(log[0]).toMatch(/^thought:/);
-    expect(log[0]).toContain("error");
+    expect(log[0]).toMatch(/^error:/);
+    expect(log[0]).toContain("plan");
     store.close();
   });
 
-  it("posts a thought when the session is unknown", async () => {
+  it("posts a response (not error) when the session is already done", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_p5", "done", "iss");
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
+    await orch.onPrompted(ctxFor("as_p5"), "thanks!");
+    expect(log.length).toBe(1);
+    expect(log[0]).toMatch(/^response:/);
+    store.close();
+  });
+
+  it("posts a terminal error when the session is unknown", async () => {
     const store = new SessionStore(":memory:");
     const log: string[] = [];
     const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
     await orch.onPrompted(ctxFor("as_p2"), "approve");
     expect(log.length).toBe(1);
-    expect(log[0]).toMatch(/^thought:/);
+    expect(log[0]).toMatch(/^error:/);
+    store.close();
+  });
+
+  it("'stop' while awaiting approval closes the session", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_p6", "await_approval", "iss");
+    store.setPlan("as_p6", "the plan");
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
+    await orch.onPrompted(ctxFor("as_p6"), "stop");
+    expect(log.length).toBe(1);
+    expect(log[0]).toMatch(/^response:/);
+    expect(store.get("as_p6")?.phase).toBe("done");
     store.close();
   });
 
@@ -90,15 +116,17 @@ describe("onPrompted never goes silent", () => {
     store.close();
   });
 
-  it("still posts the not-approved thought on rejection", async () => {
+  // Elicitation, not thought — puts the session back into "awaiting input"
+  // instead of leaving it spinning as "working".
+  it("re-elicits on rejection and stays in await_approval", async () => {
     const store = new SessionStore(":memory:");
     store.upsert("as_p4", "await_approval", "iss");
     store.setPlan("as_p4", "the plan");
     const log: string[] = [];
     const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
-    await orch.onPrompted(ctxFor("as_p4"), "no, change the approach");
+    await orch.onPrompted(ctxFor("as_p4"), "hold on, change the approach");
     expect(log.length).toBe(1);
-    expect(log[0]).toMatch(/^thought:/);
+    expect(log[0]).toMatch(/^elicitation:/);
     expect(store.get("as_p4")?.phase).toBe("await_approval");
     store.close();
   });
