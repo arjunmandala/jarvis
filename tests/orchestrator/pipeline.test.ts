@@ -391,3 +391,60 @@ describe("finishImplement persists pr_url (via reconcile)", () => {
     store.close();
   });
 });
+
+describe("on-demand review on done sessions", () => {
+  it("done WITHOUT pr_url keeps the old re-assign reply", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_od1", "done", "iss");
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
+    await orch.onPrompted(ctxFor("as_od1"), "can you review it?");
+    expect(log.length).toBe(1);
+    expect(log[0]).toMatch(/^response:/);
+    expect(log[0]).toContain("re-assign");
+    store.close();
+  });
+
+  it("'stop' on done-with-PR closes politely without a review run", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_od2", "done", "iss");
+    store.setPrUrl("as_od2", "https://github.com/o/r/pull/1");
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
+    await orch.onPrompted(ctxFor("as_od2"), "stop");
+    expect(log.length).toBe(1);
+    expect(log[0]).toMatch(/^response:/);
+    expect(store.get("as_od2")?.phase).toBe("done");
+    store.close();
+  });
+
+  it("reconcile finishes a review row: report posted, review stored, phase done", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_od3", "review", "iss");
+    store.setSandbox("as_od3", "sbx_r");
+    const log: string[] = [];
+    const report = "## Review\n\nfindings...\n\n_Report only — no changes were made._";
+    const result = JSON.stringify({ kind: "result", subtype: "success", text: report, costUsd: null, sessionId: null });
+    const orch = new Orchestrator(
+      { targetRepo: "o/r" } as Config, store, () => fakeActs(log),
+      undefined, async () => fakeReconnected(result),
+    );
+    await orch.reconcile();
+    const row = store.get("as_od3");
+    expect(row?.phase).toBe("done");
+    expect(row?.review).toBe(report);
+    expect(log.some((l) => l.startsWith("response:"))).toBe(true);
+    store.close();
+  });
+
+  it("reconcile of a review row with no sandbox goes back to done (not error)", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_od4", "review", "iss");
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
+    await orch.reconcile();
+    expect(store.get("as_od4")?.phase).toBe("done");
+    expect(log.some((l) => l.startsWith("error:"))).toBe(true);
+    store.close();
+  });
+});

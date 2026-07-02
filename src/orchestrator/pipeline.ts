@@ -1,5 +1,5 @@
 import type { Config } from "../config.ts";
-import type { SessionStore, Phase } from "../store/sessions.ts";
+import type { SessionStore, Phase, SessionRow } from "../store/sessions.ts";
 import type { Activities } from "../linear/activities.ts";
 import type { IssueContext } from "../linear/context.ts";
 import { APPROVAL_FOOTER } from "../linear/context.ts";
@@ -276,6 +276,10 @@ export class Orchestrator {
     if (!row || row.phase !== "await_approval") {
       // Terminal activities only — a `thought` would leave Linear stuck on "working".
       const phase = row?.phase ?? "unknown";
+      if (phase === "done" && row?.prUrl) {
+        await this.#onDoneFollowUp(ctx, row, replyText, acts);
+        return;
+      }
       console.log(`[skip] ${ctx.agentSessionId} prompted but phase=${phase} — replying with status`);
       if (phase === "done") {
         await acts.response("This task is already done — re-assign the issue to start something new.");
@@ -410,6 +414,52 @@ export class Orchestrator {
     }
   }
 
+  // A reply on a finished session that has a PR: conversational follow-up.
+  // "stop" closes politely; anything else runs a review agent against the PR
+  // diff with the user's message as steering ("review this" reviews; a
+  // question gets answered in the diff's context).
+  async #onDoneFollowUp(ctx: IssueContext, row: SessionRow, replyText: string, acts: Activities): Promise<void> {
+    if (parseStopGate(replyText)) {
+      await acts.response("Understood — closing this out. The PR is waiting on human review.");
+      return;
+    }
+    console.log(`[phase] ${ctx.agentSessionId} done → review (follow-up on ${row.prUrl})`);
+    this.#store.setPhase(ctx.agentSessionId, "review");
+    await acts.thought("Looking at the PR diff…");
+    const map = this.#store.getRepoMap(this.#config.targetRepo);
+    let result: JarvisEvent | null = null;
+    try {
+      result = await withSandbox(this.#sbxCfg(), async (sbx) => {
+        this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
+        await cloneRepo(sbx, this.#sbxCfg());
+        return this.#trackedRun(ctx.agentSessionId, "review", sbx, reviewTask(ctx, row.prUrl!, row.plan, replyText, map), acts);
+      });
+    } catch (err) {
+      console.error(`[review] ${ctx.agentSessionId} review run failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    await this.#finishReview(ctx.agentSessionId, acts, result);
+  }
+
+  // Review always returns the session to done — a failed review is retryable
+  // by replying again, never a wedged `error` session.
+  async #finishReview(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
+    const report = result?.kind === "result" && result.text ? result.text : null;
+    try {
+      if (report) {
+        console.log(`[phase] ${agentSessionId} review → done (${report.length} chars)`);
+        this.#store.setReview(agentSessionId, report);
+        await acts.response(`${report}${costLine(result)}`);
+      } else {
+        console.error(`[phase] ${agentSessionId} review produced no report`);
+        await acts.error("I couldn't complete the review — reply again to retry.");
+      }
+    } catch (err) {
+      console.error(`[review] ${agentSessionId} failed to post review activity: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      this.#store.setPhase(agentSessionId, "done");
+    }
+  }
+
   // Self-review: after an implement run that produced a PR, size the diff in
   // the SAME sandbox (branch still checked out); over threshold, run a review
   // task and return its report. Advisory only — every failure path returns
@@ -456,20 +506,20 @@ export class Orchestrator {
   // cannot double-run it — onPrompted only acts in phase await_approval, and
   // reconciled rows are in plan/implement until #finish* moves them.
   async reconcile(): Promise<void> {
-    const rows = this.#store.listByPhase("plan", "implement");
+    const rows = this.#store.listByPhase("plan", "implement", "review");
     if (rows.length === 0) return;
     console.log(`[reconcile] ${rows.length} in-flight session(s) to reconcile`);
     await Promise.allSettled(
       rows.map(async (row) => {
         const id = row.agentSessionId;
         const acts = this.#makeActs(id);
+        // review is advisory: recover to done (retryable by replying), not error
+        const fail = (message: string) =>
+          row.phase === "review" ? this.#finishReview(id, acts, null) : this.#failLoud(id, acts, message);
         try {
           if (!row.sandboxId) {
             console.log(`[reconcile] ${id} phase=${row.phase} has no sandboxId — failing loud`);
-            await this.#failLoud(
-              id, acts,
-              "A restart interrupted this run before its sandbox was recorded — re-assign the issue to retry.",
-            );
+            await fail("A restart interrupted this run before its sandbox was recorded — re-assign the issue to retry.");
             return;
           }
           console.log(`[reconcile] ${id} phase=${row.phase} re-attaching to sandbox ${row.sandboxId}`);
@@ -478,20 +528,22 @@ export class Orchestrator {
             sbx = await this.#connect(row.sandboxId);
           } catch (err) {
             console.error(`[reconcile] ${id} connect failed: ${err instanceof Error ? err.message : String(err)}`);
-            await this.#failLoud(id, acts, "A restart interrupted this run — re-assign the issue to retry.");
+            await fail("A restart interrupted this run — re-assign the issue to retry.");
             return;
           }
           try {
             const result = await watchDetached(sbx);
             if (!result) {
               console.log(`[reconcile] ${id} no result recovered from sandbox — failing loud`);
-              await this.#failLoud(id, acts, "A restart interrupted this run — re-assign the issue to retry.");
+              await fail("A restart interrupted this run — re-assign the issue to retry.");
               return;
             }
             console.log(`[reconcile] ${id} recovered result (${result.kind}) — finishing phase=${row.phase}`);
             this.#logUsage(`reconcile ${id}`, result);
             if (row.phase === "plan") {
               await this.#finishPlan(id, acts, result);
+            } else if (row.phase === "review") {
+              await this.#finishReview(id, acts, result);
             } else {
               await this.#finishImplement(id, acts, result);
             }
