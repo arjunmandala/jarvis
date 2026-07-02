@@ -7,6 +7,7 @@ export interface SessionRow {
   phase: Phase;
   issueId: string | null;
   plan: string | null;
+  sandboxId: string | null;
   updatedAt: string;
 }
 
@@ -27,6 +28,9 @@ export class SessionStore {
     const cols = this.#db.prepare(`SELECT name FROM pragma_table_info('sessions')`).all() as { name: string }[];
     if (!cols.some((c) => c.name === "plan")) {
       this.#db.exec(`ALTER TABLE sessions ADD COLUMN plan TEXT`);
+    }
+    if (!cols.some((c) => c.name === "sandbox_id")) {
+      this.#db.exec(`ALTER TABLE sessions ADD COLUMN sandbox_id TEXT`);
     }
   }
 
@@ -55,11 +59,26 @@ export class SessionStore {
       .run(plan, new Date().toISOString(), agentSessionId);
   }
 
+  setSandbox(agentSessionId: string, sandboxId: string | null): void {
+    this.#db
+      .prepare(`UPDATE sessions SET sandbox_id = ?, updated_at = ? WHERE agent_session_id = ?`)
+      .run(sandboxId, new Date().toISOString(), agentSessionId);
+  }
+
   get(agentSessionId: string): SessionRow | undefined {
     const row = this.#db
-      .prepare(`SELECT agent_session_id, phase, issue_id, plan, updated_at FROM sessions WHERE agent_session_id = ?`)
+      .prepare(
+        `SELECT agent_session_id, phase, issue_id, plan, sandbox_id, updated_at FROM sessions WHERE agent_session_id = ?`,
+      )
       .get(agentSessionId) as
-      | { agent_session_id: string; phase: Phase; issue_id: string | null; plan: string | null; updated_at: string }
+      | {
+          agent_session_id: string;
+          phase: Phase;
+          issue_id: string | null;
+          plan: string | null;
+          sandbox_id: string | null;
+          updated_at: string;
+        }
       | undefined;
     if (!row) return undefined;
     return {
@@ -67,8 +86,33 @@ export class SessionStore {
       phase: row.phase,
       issueId: row.issue_id,
       plan: row.plan,
+      sandboxId: row.sandbox_id,
       updatedAt: row.updated_at,
     };
+  }
+
+  listByPhase(...phases: Phase[]): SessionRow[] {
+    const placeholders = phases.map(() => "?").join(", ");
+    const rows = this.#db
+      .prepare(
+        `SELECT agent_session_id, phase, issue_id, plan, sandbox_id, updated_at FROM sessions WHERE phase IN (${placeholders})`,
+      )
+      .all(...phases) as {
+      agent_session_id: string;
+      phase: Phase;
+      issue_id: string | null;
+      plan: string | null;
+      sandbox_id: string | null;
+      updated_at: string;
+    }[];
+    return rows.map((row) => ({
+      agentSessionId: row.agent_session_id,
+      phase: row.phase,
+      issueId: row.issue_id,
+      plan: row.plan,
+      sandboxId: row.sandbox_id,
+      updatedAt: row.updated_at,
+    }));
   }
 
   close(): void {
