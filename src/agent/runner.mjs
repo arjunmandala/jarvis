@@ -1,10 +1,11 @@
 // Runs INSIDE the E2B sandbox. Reads a task JSON, runs the Claude Agent SDK,
 // and prints newline-delimited JarvisEvent JSON to stdout for the host to parse.
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 const task = JSON.parse(readFileSync(process.env.JARVIS_TASK_FILE, "utf8"));
 const emit = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
+const RESULT_FILE = "/tmp/jarvis-result.json";
 
 try {
   for await (const message of query({
@@ -26,7 +27,7 @@ try {
         else if (block.type === "tool_use") emit({ kind: "tool_use", name: block.name, input: block.input });
       }
     } else if (message.type === "result") {
-      emit({
+      const ev = {
         kind: "result",
         subtype: message.subtype,
         text: message.subtype === "success" ? message.result : null,
@@ -34,10 +35,18 @@ try {
         sessionId: message.session_id ?? null,
         usage: message.usage ?? null,
         numTurns: message.num_turns ?? null,
-      });
+      };
+      writeFileSync(RESULT_FILE, JSON.stringify(ev));
+      emit(ev);
     }
   }
 } catch (err) {
-  emit({ kind: "error", message: String(err?.message ?? err) });
+  const ev = { kind: "error", message: String(err?.message ?? err) };
+  try {
+    writeFileSync(RESULT_FILE, JSON.stringify(ev));
+  } catch (writeErr) {
+    // Write failure must not mask the emit
+  }
+  emit(ev);
   process.exit(1);
 }
