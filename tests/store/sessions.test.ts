@@ -136,3 +136,33 @@ describe("run telemetry", () => {
     store.close();
   });
 });
+
+describe("pr_url and review columns", () => {
+  it("round-trips pr_url and review through setters", () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_r1", "done", "iss");
+    store.setPrUrl("as_r1", "https://github.com/o/r/pull/7");
+    store.setReview("as_r1", "## Review\n\nLooks fine.");
+    const row = store.get("as_r1");
+    expect(row?.prUrl).toBe("https://github.com/o/r/pull/7");
+    expect(row?.review).toBe("## Review\n\nLooks fine.");
+    store.close();
+  });
+
+  it("defaults both to null on new rows", () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_r2", "plan", "iss");
+    const row = store.get("as_r2");
+    expect(row?.prUrl).toBeNull();
+    expect(row?.review).toBeNull();
+    store.close();
+  });
+
+  it("lists sessions in the review phase", () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_r3", "review", "iss");
+    const rows = store.listByPhase("review");
+    expect(rows.map((r) => r.agentSessionId)).toEqual(["as_r3"]);
+    store.close();
+  });
+});

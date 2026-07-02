@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 
-export type Phase = "clarify" | "plan" | "await_approval" | "implement" | "done" | "error";
+export type Phase = "clarify" | "plan" | "await_approval" | "implement" | "review" | "done" | "error";
 
 export interface SessionRow {
   agentSessionId: string;
@@ -8,6 +8,8 @@ export interface SessionRow {
   issueId: string | null;
   plan: string | null;
   sandboxId: string | null;
+  prUrl: string | null;
+  review: string | null;
   updatedAt: string;
 }
 
@@ -41,6 +43,12 @@ export class SessionStore {
     }
     if (!cols.some((c) => c.name === "sandbox_id")) {
       this.#db.exec(`ALTER TABLE sessions ADD COLUMN sandbox_id TEXT`);
+    }
+    if (!cols.some((c) => c.name === "pr_url")) {
+      this.#db.exec(`ALTER TABLE sessions ADD COLUMN pr_url TEXT`);
+    }
+    if (!cols.some((c) => c.name === "review")) {
+      this.#db.exec(`ALTER TABLE sessions ADD COLUMN review TEXT`);
     }
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS repo_maps (
@@ -152,10 +160,22 @@ export class SessionStore {
       .run(sandboxId, new Date().toISOString(), agentSessionId);
   }
 
+  setPrUrl(agentSessionId: string, prUrl: string): void {
+    this.#db
+      .prepare(`UPDATE sessions SET pr_url = ?, updated_at = ? WHERE agent_session_id = ?`)
+      .run(prUrl, new Date().toISOString(), agentSessionId);
+  }
+
+  setReview(agentSessionId: string, review: string): void {
+    this.#db
+      .prepare(`UPDATE sessions SET review = ?, updated_at = ? WHERE agent_session_id = ?`)
+      .run(review, new Date().toISOString(), agentSessionId);
+  }
+
   get(agentSessionId: string): SessionRow | undefined {
     const row = this.#db
       .prepare(
-        `SELECT agent_session_id, phase, issue_id, plan, sandbox_id, updated_at FROM sessions WHERE agent_session_id = ?`,
+        `SELECT agent_session_id, phase, issue_id, plan, sandbox_id, pr_url, review, updated_at FROM sessions WHERE agent_session_id = ?`,
       )
       .get(agentSessionId) as
       | {
@@ -164,6 +184,8 @@ export class SessionStore {
           issue_id: string | null;
           plan: string | null;
           sandbox_id: string | null;
+          pr_url: string | null;
+          review: string | null;
           updated_at: string;
         }
       | undefined;
@@ -174,6 +196,8 @@ export class SessionStore {
       issueId: row.issue_id,
       plan: row.plan,
       sandboxId: row.sandbox_id,
+      prUrl: row.pr_url,
+      review: row.review,
       updatedAt: row.updated_at,
     };
   }
@@ -182,7 +206,7 @@ export class SessionStore {
     const placeholders = phases.map(() => "?").join(", ");
     const rows = this.#db
       .prepare(
-        `SELECT agent_session_id, phase, issue_id, plan, sandbox_id, updated_at FROM sessions WHERE phase IN (${placeholders})`,
+        `SELECT agent_session_id, phase, issue_id, plan, sandbox_id, pr_url, review, updated_at FROM sessions WHERE phase IN (${placeholders})`,
       )
       .all(...phases) as {
       agent_session_id: string;
@@ -190,6 +214,8 @@ export class SessionStore {
       issue_id: string | null;
       plan: string | null;
       sandbox_id: string | null;
+      pr_url: string | null;
+      review: string | null;
       updated_at: string;
     }[];
     return rows.map((row) => ({
@@ -198,6 +224,8 @@ export class SessionStore {
       issueId: row.issue_id,
       plan: row.plan,
       sandboxId: row.sandbox_id,
+      prUrl: row.pr_url,
+      review: row.review,
       updatedAt: row.updated_at,
     }));
   }
