@@ -30,7 +30,6 @@ export function toolParameter(input: unknown): string {
 }
 
 export class Orchestrator {
-  #plans = new Map<string, string>(); // agentSessionId -> approved/proposed plan text (v1; persist in Phase 4)
   #config: Config;
   #store: SessionStore;
   #makeActs: (agentSessionId: string) => Activities;
@@ -106,22 +105,41 @@ export class Orchestrator {
       this.#store.setPhase(ctx.agentSessionId, "error");
       return;
     }
-    this.#plans.set(ctx.agentSessionId, plan);
+    this.#store.setPlan(ctx.agentSessionId, plan);
     this.#store.setPhase(ctx.agentSessionId, "await_approval");
     await acts.elicitation(`${plan}\n\n---\n**Reply "approve" to have me implement this**, or tell me what to change.`);
   }
 
-  // prompted: a reply arrived while awaiting approval
+  // prompted: a reply arrived while awaiting approval.
+  // Contract: every path logs AND posts an activity — a session that receives
+  // a prompt and emits nothing is marked unresponsive by Linear (10s rule).
   async onPrompted(ctx: IssueContext, replyText: string): Promise<void> {
+    const acts = this.#makeActs(ctx.agentSessionId);
     const row = this.#store.get(ctx.agentSessionId);
-    if (!row || row.phase !== "await_approval") return; // ignore unrelated prompts in v1
-    const approved = parseApprovalGate(replyText);
-    if (!approved) {
-      await this.#makeActs(ctx.agentSessionId).thought("Understood — not implementing yet. Tell me to 'approve' when ready.");
+    if (!row || row.phase !== "await_approval") {
+      const phase = row?.phase ?? "unknown";
+      console.log(`[skip] ${ctx.agentSessionId} prompted but phase=${phase} — replying with status`);
+      await acts.thought(
+        `This session is in state \`${phase}\`, so I can't act on that reply. ` +
+          `To start over, re-assign the issue to me.`,
+      );
       return;
     }
-    const acts = this.#makeActs(ctx.agentSessionId);
-    const plan = this.#plans.get(ctx.agentSessionId) ?? "";
+    const approved = parseApprovalGate(replyText);
+    if (!approved) {
+      console.log(`[phase] ${ctx.agentSessionId} reply parsed as NOT approval — staying in await_approval`);
+      await acts.thought("Understood — not implementing yet. Tell me to 'approve' when ready.");
+      return;
+    }
+    const plan = row.plan;
+    if (!plan || !plan.trim()) {
+      console.error(`[phase] ${ctx.agentSessionId} approved but plan is missing — refusing to implement blind`);
+      await acts.error(
+        "I lost the plan for this session (likely a restart before it was saved). Re-assign the issue and I'll plan again.",
+      );
+      this.#store.setPhase(ctx.agentSessionId, "error");
+      return;
+    }
     this.#store.setPhase(ctx.agentSessionId, "implement");
     console.log(`[phase] ${ctx.agentSessionId} → implement (approved)`);
     await acts.thought("Approved — implementing in a sandbox now.");
