@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { nextPhase, toolParameter, Orchestrator, recoverPlan } from "../../src/orchestrator/pipeline.ts";
+import { nextPhase, toolParameter, Orchestrator, recoverPlan, diffExceedsThreshold } from "../../src/orchestrator/pipeline.ts";
 import { SessionStore } from "../../src/store/sessions.ts";
 import type { Activities } from "../../src/linear/activities.ts";
 import type { IssueContext } from "../../src/linear/context.ts";
@@ -331,5 +331,24 @@ describe("recoverPlan", () => {
     expect(result).toBeNull();
     expect(store.get("as_r6")?.plan).toBeFalsy();
     store.close();
+  });
+});
+
+describe("diffExceedsThreshold", () => {
+  it("small diff is under", () => {
+    expect(diffExceedsThreshold(" 2 files changed, 30 insertions(+), 4 deletions(-)")).toBe(false);
+  });
+  it("many files trips it", () => {
+    expect(diffExceedsThreshold(" 6 files changed, 10 insertions(+)")).toBe(true);
+  });
+  it("many lines trips it (insertions + deletions)", () => {
+    expect(diffExceedsThreshold(" 3 files changed, 150 insertions(+), 80 deletions(-)")).toBe(true);
+  });
+  it("singular forms parse", () => {
+    expect(diffExceedsThreshold(" 1 file changed, 1 insertion(+), 1 deletion(-)")).toBe(false);
+  });
+  it("empty/garbage output is under (no review on parse failure)", () => {
+    expect(diffExceedsThreshold("")).toBe(false);
+    expect(diffExceedsThreshold("fatal: bad revision")).toBe(false);
   });
 });

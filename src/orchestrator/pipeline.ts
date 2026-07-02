@@ -16,6 +16,21 @@ export function costLine(result: JarvisEvent | null): string {
   return `\n\n_Cost: $${result.costUsd.toFixed(4)}_`;
 }
 
+// Self-review trigger: a diff bigger than either bound gets an automatic
+// review pass before the PR is announced. Deterministic, no model call.
+export const REVIEW_MAX_FILES = 5;
+export const REVIEW_MAX_LINES = 200;
+
+// Parses `git diff --shortstat` output, e.g.
+// " 12 files changed, 340 insertions(+), 12 deletions(-)".
+// Unparseable input returns false — no review rather than a spurious one.
+export function diffExceedsThreshold(shortstat: string): boolean {
+  const files = Number(/(\d+) files? changed/.exec(shortstat)?.[1] ?? 0);
+  const insertions = Number(/(\d+) insertions?\(\+\)/.exec(shortstat)?.[1] ?? 0);
+  const deletions = Number(/(\d+) deletions?\(-\)/.exec(shortstat)?.[1] ?? 0);
+  return files > REVIEW_MAX_FILES || insertions + deletions > REVIEW_MAX_LINES;
+}
+
 export function nextPhase(current: Phase, approved: boolean): Phase {
   switch (current) {
     case "clarify": return "plan";
