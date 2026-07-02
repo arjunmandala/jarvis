@@ -15,6 +15,10 @@ export function makeServer(config: Config): Hono {
   const handler = webhook.createHandler();
   const orchestrator = new Orchestrator(config, store, (id) => makeActivities(linear, id), makePlanFetcher(config.linear.accessToken));
 
+  // Boot reconciliation: recover or fail-loud every session left in-flight by a
+  // restart. Fire-and-forget so server startup isn't blocked on e2b.
+  void orchestrator.reconcile().catch((e) => console.error("[reconcile]", e));
+
   // Log every inbound request (method, path, status) — so webhook delivery is
   // visible even when signature verification rejects it before our handler.
   app.use("*", async (c, next) => {

@@ -3,7 +3,8 @@ import type { SessionStore, Phase } from "../store/sessions.ts";
 import type { Activities } from "../linear/activities.ts";
 import type { IssueContext } from "../linear/context.ts";
 import { APPROVAL_FOOTER } from "../linear/context.ts";
-import { withSandbox, cloneRepo, runAgent } from "../sandbox/session.ts";
+import { withSandbox, cloneRepo, runAgent, watchDetached, type AgentSandbox } from "../sandbox/session.ts";
+import { Sandbox } from "e2b";
 import { planTask, implementTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
 
@@ -54,22 +55,31 @@ export async function recoverPlan(
   return recovered;
 }
 
+// A connected sandbox we can watch and then kill — the seam reconcile() needs.
+type Reconnected = AgentSandbox & { kill(): Promise<unknown> };
+
 export class Orchestrator {
   #config: Config;
   #store: SessionStore;
   #makeActs: (agentSessionId: string) => Activities;
   #fetchPlan?: (agentSessionId: string) => Promise<string | null>;
+  #connect: (sandboxId: string) => Promise<Reconnected>;
 
   constructor(
     config: Config,
     store: SessionStore,
     makeActs: (agentSessionId: string) => Activities,
     fetchPlan?: (agentSessionId: string) => Promise<string | null>,
+    connect?: (sandboxId: string) => Promise<Reconnected>,
   ) {
     this.#config = config;
     this.#store = store;
     this.#makeActs = makeActs;
     this.#fetchPlan = fetchPlan;
+    // Default: a real e2b reconnect. Tests inject a fake so nothing touches e2b/network.
+    this.#connect =
+      connect ??
+      ((sandboxId) => Sandbox.connect(sandboxId, { apiKey: this.#config.e2bApiKey }) as Promise<Reconnected>);
   }
 
   #sbxCfg() {
@@ -126,16 +136,23 @@ export class Orchestrator {
       return runAgent(sbx, this.#config.anthropicApiKey, planTask(ctx), this.#relay(acts));
     });
 
-    this.#logUsage(`plan ${ctx.agentSessionId}`, result);
+    await this.#finishPlan(ctx.agentSessionId, acts, result);
+  }
+
+  // Everything after the plan run: persist the plan, post the elicitation, and
+  // advance to await_approval — or fail loud if no plan was produced. Called
+  // from onCreated and, after a restart, from reconcile.
+  async #finishPlan(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
+    this.#logUsage(`plan ${agentSessionId}`, result);
     const plan = result?.kind === "result" && result.text ? result.text : null;
-    console.log(`[phase] ${ctx.agentSessionId} plan run finished (plan=${plan ? plan.length + " chars" : "NONE"})`);
+    console.log(`[phase] ${agentSessionId} plan run finished (plan=${plan ? plan.length + " chars" : "NONE"})`);
     if (!plan) {
       await acts.error("I couldn't produce a plan. Please add detail to the issue and re-assign me.");
-      this.#store.setPhase(ctx.agentSessionId, "error");
+      this.#store.setPhase(agentSessionId, "error");
       return;
     }
-    this.#store.setPlan(ctx.agentSessionId, plan);
-    this.#store.setPhase(ctx.agentSessionId, "await_approval");
+    this.#store.setPlan(agentSessionId, plan);
+    this.#store.setPhase(agentSessionId, "await_approval");
     await acts.elicitation(`${plan}${APPROVAL_FOOTER}${costLine(result)}`);
   }
 
@@ -194,16 +211,76 @@ export class Orchestrator {
       return runAgent(sbx, this.#config.anthropicApiKey, implementTask(ctx, plan), this.#relay(acts));
     });
 
-    this.#logUsage(`implement ${ctx.agentSessionId}`, result);
+    await this.#finishImplement(ctx.agentSessionId, acts, result);
+  }
+
+  // Everything after the implement run: post the PR (done) or the failure
+  // (error). Called from onPrompted and, after a restart, from reconcile.
+  async #finishImplement(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
+    this.#logUsage(`implement ${agentSessionId}`, result);
     if (result?.kind === "result" && result.text) {
-      console.log(`[phase] ${ctx.agentSessionId} → done (PR: ${result.text.slice(0, 100)})`);
+      console.log(`[phase] ${agentSessionId} → done (PR: ${result.text.slice(0, 100)})`);
       await acts.response(`Done. PR opened:\n\n${result.text}\n\n_A human review + merge closes this out._${costLine(result)}`);
-      this.#store.setPhase(ctx.agentSessionId, "done");
+      this.#store.setPhase(agentSessionId, "done");
     } else {
-      console.error(`[phase] ${ctx.agentSessionId} → error (implement did not complete)`);
+      console.error(`[phase] ${agentSessionId} → error (implement did not complete)`);
       await acts.error(result?.kind === "error" ? result.message : "Implementation did not complete.");
-      this.#store.setPhase(ctx.agentSessionId, "error");
+      this.#store.setPhase(agentSessionId, "error");
     }
+  }
+
+  // Boot reconciliation: on startup, no in-flight session should be left hanging.
+  // For every row still in a run phase (plan/implement), either recover it by
+  // re-attaching to its sandbox, or fail it loud so the human can re-assign.
+  async reconcile(): Promise<void> {
+    const rows = this.#store.listByPhase("plan", "implement");
+    if (rows.length === 0) return;
+    console.log(`[reconcile] ${rows.length} in-flight session(s) to reconcile`);
+    await Promise.allSettled(
+      rows.map(async (row) => {
+        const id = row.agentSessionId;
+        const acts = this.#makeActs(id);
+        try {
+          if (!row.sandboxId) {
+            console.log(`[reconcile] ${id} phase=${row.phase} has no sandboxId — failing loud`);
+            await acts.error(
+              "A restart interrupted this run before its sandbox was recorded — re-assign the issue to retry.",
+            );
+            this.#store.setPhase(id, "error");
+            return;
+          }
+          console.log(`[reconcile] ${id} phase=${row.phase} re-attaching to sandbox ${row.sandboxId}`);
+          let sbx: Reconnected;
+          try {
+            sbx = await this.#connect(row.sandboxId);
+          } catch (err) {
+            console.error(`[reconcile] ${id} connect failed: ${err instanceof Error ? err.message : String(err)}`);
+            await acts.error("A restart interrupted this run — re-assign the issue to retry.");
+            this.#store.setPhase(id, "error");
+            return;
+          }
+          try {
+            const result = await watchDetached(sbx);
+            if (!result) {
+              console.log(`[reconcile] ${id} no result recovered from sandbox — failing loud`);
+              await acts.error("A restart interrupted this run — re-assign the issue to retry.");
+              this.#store.setPhase(id, "error");
+              return;
+            }
+            console.log(`[reconcile] ${id} recovered result (${result.kind}) — finishing phase=${row.phase}`);
+            if (row.phase === "plan") {
+              await this.#finishPlan(id, acts, result);
+            } else {
+              await this.#finishImplement(id, acts, result);
+            }
+          } finally {
+            await sbx.kill().catch(() => undefined);
+          }
+        } catch (err) {
+          console.error(`[reconcile] ${id} reconciliation failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }),
+    );
   }
 }
 

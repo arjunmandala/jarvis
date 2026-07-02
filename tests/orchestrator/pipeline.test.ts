@@ -159,6 +159,113 @@ describe("onPrompted plan recovery from Linear", () => {
 
 });
 
+describe("reconcile", () => {
+  // Fake connected sandbox: watchDetached reads RESULT_FILE via files.read and
+  // polls commands.list. A resultJson makes watchDetached return that event on
+  // the first poll; null resultJson => files.read throws (missing file) and the
+  // (empty) process list makes watchDetached give up with null.
+  function fakeSandbox(resultJson: string | null) {
+    const kills: number[] = [];
+    const sbx = {
+      files: {
+        read: async () => {
+          if (resultJson == null) throw new Error("no such file");
+          return resultJson;
+        },
+        write: async () => undefined,
+      },
+      commands: {
+        run: async () => ({ exitCode: 0 }),
+        list: async () => [],
+      },
+      kill: async () => {
+        kills.push(1);
+      },
+    };
+    return { sbx, kills };
+  }
+
+  it("(a) errors a stuck plan row without a sandboxId and sets phase=error", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_rc1", "plan", "iss"); // no sandboxId ever recorded
+    const log: string[] = [];
+    let connectCalls = 0;
+    const connect = async () => {
+      connectCalls++;
+      return fakeSandbox(null).sbx;
+    };
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log), undefined, connect);
+    await orch.reconcile();
+    expect(connectCalls).toBe(0); // must not touch e2b when there's no sandbox
+    expect(log.length).toBe(1);
+    expect(log[0]).toMatch(/^error:/);
+    expect(log[0]).toContain("before its sandbox was record"); // fakeActs truncates to 60 chars
+    expect(store.get("as_rc1")?.phase).toBe("error");
+    store.close();
+  });
+
+  it("(b) recovers a stuck plan row from a result-file event: elicitation + await_approval + plan persisted", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_rc2", "plan", "iss");
+    store.setSandbox("as_rc2", "sbx-abc");
+    const log: string[] = [];
+    const resultEvent = JSON.stringify({
+      kind: "result",
+      subtype: "success",
+      text: "THE RECOVERED PLAN",
+      costUsd: 0.1234,
+      sessionId: null,
+    });
+    const { sbx, kills } = fakeSandbox(resultEvent);
+    let connectedWith = "";
+    const connect = async (sandboxId: string) => {
+      connectedWith = sandboxId;
+      return sbx;
+    };
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log), undefined, connect);
+    await orch.reconcile();
+    expect(connectedWith).toBe("sbx-abc");
+    expect(kills.length).toBe(1); // sandbox always killed when connected
+    expect(log.some((l) => l.startsWith("elicitation:"))).toBe(true);
+    expect(store.get("as_rc2")?.phase).toBe("await_approval");
+    expect(store.get("as_rc2")?.plan).toBe("THE RECOVERED PLAN");
+    store.close();
+  });
+
+  it("(c) leaves done rows untouched", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_rc3", "done", "iss");
+    const log: string[] = [];
+    let connectCalls = 0;
+    const connect = async () => {
+      connectCalls++;
+      return fakeSandbox(null).sbx;
+    };
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log), undefined, connect);
+    await orch.reconcile();
+    expect(connectCalls).toBe(0);
+    expect(log.length).toBe(0);
+    expect(store.get("as_rc3")?.phase).toBe("done");
+    store.close();
+  });
+
+  it("errors a stuck row when connect fails, setting phase=error and not throwing", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_rc4", "implement", "iss");
+    store.setSandbox("as_rc4", "sbx-gone");
+    const log: string[] = [];
+    const connect = async () => {
+      throw new Error("sandbox is gone");
+    };
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log), undefined, connect);
+    await orch.reconcile();
+    expect(log.some((l) => l.startsWith("error:"))).toBe(true);
+    expect(log.some((l) => l.includes("A restart interrupted this run"))).toBe(true);
+    expect(store.get("as_rc4")?.phase).toBe("error");
+    store.close();
+  });
+});
+
 describe("recoverPlan", () => {
   it("persists the recovered plan via store.setPlan and returns it", async () => {
     const store = new SessionStore(":memory:");
