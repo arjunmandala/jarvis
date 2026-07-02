@@ -13,7 +13,8 @@ try {
     options: {
       cwd: task.cwd,
       model: task.model,
-      systemPrompt: { type: "preset", preset: "claude_code", append: task.systemAppend },
+      // excludeDynamicSections keeps the preset byte-stable across sandboxes so the prompt cache hits (Phase 4.2)
+      systemPrompt: { type: "preset", preset: "claude_code", append: task.systemAppend, excludeDynamicSections: true },
       settingSources: ["user", "project"], // REQUIRED so superpowers skills load
       allowedTools: task.allowedTools,
       permissionMode: "bypassPermissions", // safe: the sandbox is the isolation boundary
