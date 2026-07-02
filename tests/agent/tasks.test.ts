@@ -18,6 +18,11 @@ describe("planTask", () => {
     expect(t.goal).toContain("Add /health");
     expect(t.cwd).toBe("/home/user/repo");
   });
+
+  it("keeps plan size proportional to the issue", () => {
+    const t = planTask(ctx);
+    expect(t.systemAppend).toMatch(/proportional/i);
+  });
 });
 
 describe("implementTask", () => {
@@ -35,5 +40,12 @@ describe("implementTask", () => {
     expect(t.systemAppend).toMatch(/lint/i);
     expect(t.systemAppend).toMatch(/curl/i);
     expect(t.systemAppend).toMatch(/verification-before-completion/);
+  });
+
+  it("scales effort to change size and ends with a deterministic PR URL", () => {
+    const t = implementTask(ctx, "## Plan");
+    expect(t.systemAppend).toMatch(/gh pr view --json url/);
+    expect(t.systemAppend).toMatch(/do not dispatch subagents/i);
+    expect(t.systemAppend).toMatch(/gh auth login/);
   });
 });

@@ -13,21 +13,33 @@ export interface AgentTask {
 
 const PLAN_APPEND =
   "You are Jarvis, an autonomous engineer working a Linear ticket. " +
-  "Use the brainstorming and writing-plans skills. Explore the repo read-only to ground the plan in real files. " +
+  "Keep the plan proportional to the issue: a small fix gets a short plan — a handful of bullets naming the " +
+  "exact files and changes, nothing more. Reach for the brainstorming and writing-plans skills only for " +
+  "substantial features with real design ambiguity. " +
+  "Explore the repo read-only to ground the plan in real files. " +
   "Your FINAL message must be the complete implementation plan in Markdown — that text is returned verbatim to the human for approval. " +
   "Do not write any files.";
 
 const IMPLEMENT_APPEND =
-  "You are Jarvis, an autonomous engineer. Use subagent-driven-development to implement the APPROVED plan, " +
-  "test-driven-development while coding, and systematic-debugging on any failure. " +
-  "VERIFY before claiming success (verification-before-completion): run the repo's tests and lint, " +
-  "start the app and curl the new behaviour to prove it works; loop until everything is green. " +
-  "Then use requesting-code-review on the diff and fix what it finds. " +
-  "Finally create a branch, commit, and `git push origin <branch>` — origin's URL already has a working " +
+  "You are Jarvis, an autonomous engineer implementing an APPROVED plan. First gauge the size of the plan " +
+  "before choosing your process.\n\n" +
+  "SMALL CHANGE (roughly: 2 or fewer files, no design ambiguity, plan is a few bullets): implement it " +
+  "directly with a focused test proving the change. Do NOT dispatch subagents, do NOT re-plan or " +
+  "brainstorm, do NOT run requesting-code-review, and do NOT start the app — a passing focused test plus " +
+  "the repo's test suite is sufficient proof.\n\n" +
+  "LARGER WORK: use subagent-driven-development and test-driven-development while coding, and " +
+  "systematic-debugging on any failure. Then use requesting-code-review on the diff and fix what it finds " +
+  "before opening the PR.\n\n" +
+  "VERIFICATION (always, both sizes — verification-before-completion): run the repo's tests and lint; " +
+  "loop until everything is green. Only start the app and curl the new behaviour when a test cannot prove " +
+  "the change (e.g. user-visible or server behaviour that isn't exercised by the test suite).\n\n" +
+  "Then create a branch, commit, and `git push origin <branch>` — origin's URL already has a working " +
   "credential embedded, so push directly and do not run `gh auth login` or `gh auth setup-git` " +
   "(that rewires git's credential helper and can break the push). Then open a PR with `gh pr create --fill` " +
-  "(gh already reads GH_TOKEN from the environment; no separate gh auth step is needed). " +
-  "Your FINAL message must be the PR URL.";
+  "(gh already reads GH_TOKEN from the environment; no separate gh auth step is needed).\n\n" +
+  "DETERMINISTIC ENDING: after `gh pr create --fill`, run `gh pr view --json url -q .url` and make your " +
+  "FINAL message EXACTLY that URL — one line, no prose, no markdown. If PR creation fails, your FINAL " +
+  "message must instead start with `PR_FAILED:` followed by the reason.";
 
 function issueBlock(ctx: IssueContext): string {
   return (
@@ -53,7 +65,10 @@ export function implementTask(ctx: IssueContext, approvedPlan: string): AgentTas
   return {
     goal:
       `Implement the following APPROVED plan, push with \`git push origin <branch>\` (origin's URL already ` +
-      `has your credential — no gh auth needed for the push), then open a PR with \`gh pr create --fill\`.\n\n` +
+      `has your credential — no gh auth needed for the push), then open a PR with \`gh pr create --fill\`. ` +
+      `After the PR is created, run \`gh pr view --json url -q .url\` and make your FINAL message EXACTLY ` +
+      `that URL alone — no prose, no markdown. If PR creation fails, your FINAL message must instead start ` +
+      `with \`PR_FAILED:\` followed by the reason.\n\n` +
       `${approvedPlan}\n\n---\nOriginal issue:\n${issueBlock(ctx)}`,
     cwd: REPO_DIR,
     model: "claude-opus-4-8", // hard task
