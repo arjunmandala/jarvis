@@ -128,3 +128,19 @@ describe("mapTask", () => {
     expect(t.maxBudgetUsd).toBe(1);
   });
 });
+
+describe("conversational directives", () => {
+  it("plan, revise and implement allow the ask_user tool; map does not", () => {
+    expect(planTask(ctx).allowedTools).toContain("mcp__jarvis__ask_user");
+    expect(reviseTask(ctx, "p", "f").allowedTools).toContain("mcp__jarvis__ask_user");
+    expect(implementTask(ctx, "p").allowedTools).toContain("mcp__jarvis__ask_user");
+    expect(mapTask().allowedTools).not.toContain("mcp__jarvis__ask_user");
+  });
+
+  it("plan and implement prompts explain steering and ask_user restraint", () => {
+    for (const t of [planTask(ctx), implementTask(ctx, "p")]) {
+      expect(t.systemAppend).toMatch(/ask_user/);
+      expect(t.systemAppend).toMatch(/steer/i);
+    }
+  });
+});

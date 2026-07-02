@@ -11,6 +11,15 @@ export interface AgentTask {
   maxBudgetUsd: number;
 }
 
+// Appended to both plan and implement system prompts. Fixed text — never fold
+// per-run content in here (prompt-cache byte-stability).
+const CONVERSE_APPEND =
+  "\n\nCONVERSATION: the human may send you messages while you work — they arrive as user messages " +
+  "mid-run. Treat them as steering: acknowledge briefly and incorporate them. If you are genuinely " +
+  "blocked on a decision only the human can make, call the ask_user tool and wait for the reply; " +
+  "never ask about anything you can infer from the repo or the issue. If ask_user times out, proceed " +
+  "with your best judgment and state the assumption you made.";
+
 const PLAN_APPEND =
   "You are Jarvis, an autonomous engineer working a Linear ticket. " +
   "Keep the plan proportional to the issue: a small fix gets a short plan — a handful of bullets naming the " +
@@ -18,7 +27,7 @@ const PLAN_APPEND =
   "substantial features with real design ambiguity. " +
   "Explore the repo read-only to ground the plan in real files. " +
   "Your FINAL message must be the complete implementation plan in Markdown — that text is returned verbatim to the human for approval. " +
-  "Do not write any files.";
+  "Do not write any files." + CONVERSE_APPEND;
 
 const IMPLEMENT_APPEND =
   "You are Jarvis, an autonomous engineer implementing an APPROVED plan. First gauge the size of the plan " +
@@ -30,6 +39,9 @@ const IMPLEMENT_APPEND =
   "LARGER WORK: use subagent-driven-development and test-driven-development while coding, and " +
   "systematic-debugging on any failure. Then use requesting-code-review on the diff and fix what it finds " +
   "before opening the PR.\n\n" +
+  "ENVIRONMENT: you run as root in a disposable sandbox. If a tool, runtime, or system dependency the repo " +
+  "needs is missing (python, a compiler, a CLI), install it yourself with `apt-get install -y <pkg>` (or pip/npm " +
+  "as appropriate) and continue — never stop or report failure because something isn't installed.\n\n" +
   "VERIFICATION (always, both sizes — verification-before-completion): run the repo's tests and lint; " +
   "loop until everything is green. Only start the app and curl the new behaviour when a test cannot prove " +
   "the change (e.g. user-visible or server behaviour that isn't exercised by the test suite).\n\n" +
@@ -39,7 +51,7 @@ const IMPLEMENT_APPEND =
   "(gh already reads GH_TOKEN from the environment; no separate gh auth step is needed).\n\n" +
   "DETERMINISTIC ENDING: after `gh pr create --fill`, run `gh pr view --json url -q .url` and make your " +
   "FINAL message EXACTLY that URL — one line, no prose, no markdown. If PR creation fails, your FINAL " +
-  "message must instead start with `PR_FAILED:` followed by the reason.";
+  "message must instead start with `PR_FAILED:` followed by the reason." + CONVERSE_APPEND;
 
 function issueBlock(ctx: IssueContext): string {
   return (
@@ -62,7 +74,7 @@ export function planTask(ctx: IssueContext, repoMap?: string): AgentTask {
     cwd: REPO_DIR,
     model: "claude-sonnet-5",
     systemAppend: PLAN_APPEND,
-    allowedTools: ["Read", "Glob", "Grep", "Skill"],
+    allowedTools: ["Read", "Glob", "Grep", "Skill", "mcp__jarvis__ask_user"],
     maxTurns: 40,
     maxBudgetUsd: 2,
   };
@@ -79,7 +91,7 @@ export function reviseTask(ctx: IssueContext, previousPlan: string, feedback: st
     cwd: REPO_DIR,
     model: "claude-sonnet-5",
     systemAppend: PLAN_APPEND,
-    allowedTools: ["Read", "Glob", "Grep", "Skill"],
+    allowedTools: ["Read", "Glob", "Grep", "Skill", "mcp__jarvis__ask_user"],
     maxTurns: 40,
     maxBudgetUsd: 2,
   };
@@ -97,7 +109,7 @@ export function implementTask(ctx: IssueContext, approvedPlan: string, repoMap?:
     cwd: REPO_DIR,
     model: "claude-opus-4-8", // hard task
     systemAppend: IMPLEMENT_APPEND,
-    allowedTools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "Skill", "Agent"],
+    allowedTools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "Skill", "Agent", "mcp__jarvis__ask_user"],
     maxTurns: 200,
     maxBudgetUsd: 8,
   };
