@@ -27,3 +27,22 @@ describe("LineParser", () => {
     expect(p.flush()).toEqual([{ kind: "error", message: "x" }]);
   });
 });
+
+describe("new event kinds", () => {
+  it("parses tool_result and ask_user lines from the stream", () => {
+    const p = new LineParser();
+    const events = p.push(
+      JSON.stringify({ kind: "tool_result", tool: "Bash", isError: true, content: "pip: error" }) + "\n" +
+      JSON.stringify({ kind: "ask_user", question: "Which DB?" }) + "\n",
+    );
+    expect(events).toHaveLength(2);
+    expect(events[0].kind).toBe("tool_result");
+    expect(events[1].kind).toBe("ask_user");
+  });
+
+  it("does NOT parse user_message from the stream (host-generated only)", () => {
+    const p = new LineParser();
+    const events = p.push(JSON.stringify({ kind: "user_message", text: "hi" }) + "\n");
+    expect(events).toHaveLength(0);
+  });
+});

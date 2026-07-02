@@ -63,6 +63,22 @@ export async function cloneRepo(sbx: Sandbox, cfg: SandboxConfig): Promise<void>
       throw new Error(redactSecret(`git clone failed (${res.exitCode}): ${res.stderr}`, cfg.ghToken));
     }
   });
+  await indexRepo(sbx, cfg.ghToken);
+}
+
+// Serena index: pays the LSP indexing cost once up front instead of on the
+// agent's first symbolic query. ponytail: advisory — any failure (serena not
+// in the template yet, unsupported language, LSP crash) logs and continues;
+// the agent falls back to Grep/Glob.
+export async function indexRepo(sbx: Sandbox, ghToken = ""): Promise<void> {
+  try {
+    const res = await runCommand(sbx, `serena project index ${REPO_DIR}`);
+    if (res.exitCode !== 0) {
+      console.error(redactSecret(`[serena] project index failed (${res.exitCode}): ${res.stderr.slice(0, 300)}`, ghToken));
+    }
+  } catch (err) {
+    console.error(redactSecret(`[serena] project index errored: ${err instanceof Error ? err.message : String(err)}`, ghToken));
+  }
 }
 
 export async function runCommand(
@@ -89,6 +105,17 @@ export async function runCommand(
 // it on stdout (Task 1). This file is the authoritative record; the stream is
 // telemetry that can go half-open and hang. See runAgent / watchDetached.
 export const RESULT_FILE = "/tmp/jarvis-result.json";
+
+// Append-only JSONL the host writes user comments into; the in-sandbox runner
+// tails it and injects each line into the live agent session (steering / ask_user
+// answers). Cleared alongside RESULT_FILE at the start of every run.
+export const INBOX_FILE = "/tmp/jarvis-inbox.jsonl";
+
+// base64 round-trip so arbitrary text (quotes, newlines) survives the shell.
+export async function injectMessage(sbx: AgentSandbox, text: string): Promise<void> {
+  const b64 = Buffer.from(JSON.stringify({ text }) + "\n", "utf8").toString("base64");
+  await sbx.commands.run(`echo ${b64} | base64 -d >> ${INBOX_FILE}`, { timeoutMs: 60_000 });
+}
 
 // Narrow structural type so tests can fake a sandbox without e2b. The real e2b
 // Sandbox structurally satisfies this.
@@ -201,7 +228,7 @@ export async function runAgent(
   // (same execution context as the runner) — e2b's files.write gets a 500
   // "permission denied" overwriting a file the runner process wrote, even with
   // matching ownership (verified live against the jarvis-agent template).
-  await sbx.commands.run(`rm -f ${RESULT_FILE}`, { timeoutMs: 60_000 });
+  await sbx.commands.run(`rm -f ${RESULT_FILE} ${INBOX_FILE}`, { timeoutMs: 60_000 });
   await sbx.files.write(taskPath, JSON.stringify(task));
 
   const parser = new LineParser();

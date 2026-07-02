@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { nextPhase, toolParameter, Orchestrator, recoverPlan } from "../../src/orchestrator/pipeline.ts";
+import { nextPhase, toolParameter, Orchestrator, recoverPlan, diffExceedsThreshold } from "../../src/orchestrator/pipeline.ts";
 import { SessionStore } from "../../src/store/sessions.ts";
 import type { Activities } from "../../src/linear/activities.ts";
 import type { IssueContext } from "../../src/linear/context.ts";
@@ -116,20 +116,10 @@ describe("onPrompted never goes silent", () => {
     store.close();
   });
 
-  // Elicitation, not thought — puts the session back into "awaiting input"
-  // instead of leaving it spinning as "working".
-  it("re-elicits on rejection and stays in await_approval", async () => {
-    const store = new SessionStore(":memory:");
-    store.upsert("as_p4", "await_approval", "iss");
-    store.setPlan("as_p4", "the plan");
-    const log: string[] = [];
-    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
-    await orch.onPrompted(ctxFor("as_p4"), "hold on, change the approach");
-    expect(log.length).toBe(1);
-    expect(log[0]).toMatch(/^elicitation:/);
-    expect(store.get("as_p4")?.phase).toBe("await_approval");
-    store.close();
-  });
+  // Non-approval, non-stop feedback now drives a plan-revision run inside
+  // withSandbox (clone + runAgent), same as onCreated's plan run — there's no
+  // seam to fake e2b here, so this path is covered by live acceptance, not a
+  // unit test (matches the repo's convention for withSandbox/e2b paths).
 });
 
 describe("onPrompted plan recovery from Linear", () => {
@@ -288,6 +278,23 @@ describe("reconcile", () => {
   });
 });
 
+describe("steer", () => {
+  it("hasLive is false and steer posts a terminal response when no run is live", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_s1", "implement", "iss");
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
+    expect(orch.hasLive("as_s1")).toBe(false);
+    await orch.steer(ctxFor("as_s1"), "actually use approach B");
+    expect(log.length).toBe(1);
+    expect(log[0]).toMatch(/^response:/);
+    store.close();
+  });
+  // The live path (inject + thought, stop-kill, ask_user elicitation, reply
+  // posting) runs inside withSandbox/runAgent — covered by live acceptance,
+  // matching the repo's convention for e2b paths.
+});
+
 describe("recoverPlan", () => {
   it("persists the recovered plan via store.setPlan and returns it", async () => {
     const store = new SessionStore(":memory:");
@@ -323,6 +330,147 @@ describe("recoverPlan", () => {
     const result = await recoverPlan(store, "as_r6", async () => "   ");
     expect(result).toBeNull();
     expect(store.get("as_r6")?.plan).toBeFalsy();
+    store.close();
+  });
+});
+
+describe("diffExceedsThreshold", () => {
+  it("small diff is under", () => {
+    expect(diffExceedsThreshold(" 2 files changed, 30 insertions(+), 4 deletions(-)")).toBe(false);
+  });
+  it("many files trips it", () => {
+    expect(diffExceedsThreshold(" 6 files changed, 10 insertions(+)")).toBe(true);
+  });
+  it("many lines trips it (insertions + deletions)", () => {
+    expect(diffExceedsThreshold(" 3 files changed, 150 insertions(+), 80 deletions(-)")).toBe(true);
+  });
+  it("singular forms parse", () => {
+    expect(diffExceedsThreshold(" 1 file changed, 1 insertion(+), 1 deletion(-)")).toBe(false);
+  });
+  it("empty/garbage output is under (no review on parse failure)", () => {
+    expect(diffExceedsThreshold("")).toBe(false);
+    expect(diffExceedsThreshold("fatal: bad revision")).toBe(false);
+  });
+});
+
+// A fake Reconnected sandbox whose RESULT_FILE already holds `resultJson`.
+// watchDetached reads the file first, so commands.list is never load-bearing.
+function fakeReconnected(resultJson: string) {
+  return {
+    files: {
+      read: async () => resultJson,
+      write: async () => undefined,
+    },
+    commands: {
+      run: async () => ({ exitCode: 0 }),
+      list: async () => [],
+    },
+    kill: async () => undefined,
+  };
+}
+
+describe("finishImplement persists pr_url (via reconcile)", () => {
+  it("stores the PR URL and moves to done", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_pr1", "implement", "iss");
+    store.setSandbox("as_pr1", "sbx_1");
+    const log: string[] = [];
+    const result = JSON.stringify({
+      kind: "result", subtype: "success",
+      text: "https://github.com/o/r/pull/42", costUsd: null, sessionId: null,
+    });
+    const orch = new Orchestrator(
+      { targetRepo: "o/r" } as Config, store, () => fakeActs(log),
+      undefined, async () => fakeReconnected(result),
+    );
+    await orch.reconcile();
+    const row = store.get("as_pr1");
+    expect(row?.phase).toBe("done");
+    expect(row?.prUrl).toBe("https://github.com/o/r/pull/42");
+    expect(log.some((l) => l.startsWith("response:"))).toBe(true);
+    store.close();
+  });
+
+  // A restart during self-review: the review run overwrote RESULT_FILE with a
+  // markdown report. Reconcile must NOT store it as pr_url or announce it as
+  // the PR — it fails loud instead.
+  it("a multi-line markdown report in RESULT_FILE does not become pr_url", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_pr2", "implement", "iss");
+    store.setSandbox("as_pr2", "sbx_2");
+    const log: string[] = [];
+    const report = "## Review\n\n1. `src/x.ts:12` — off-by-one\n\n_Report only — no changes were made._";
+    const result = JSON.stringify({
+      kind: "result", subtype: "success",
+      text: report, costUsd: null, sessionId: null,
+    });
+    const orch = new Orchestrator(
+      { targetRepo: "o/r" } as Config, store, () => fakeActs(log),
+      undefined, async () => fakeReconnected(result),
+    );
+    await orch.reconcile();
+    const row = store.get("as_pr2");
+    expect(row?.phase).toBe("error");
+    expect(row?.prUrl).toBeFalsy();
+    expect(log.some((l) => l.startsWith("response:"))).toBe(false); // no "Done. PR opened"
+    expect(log.some((l) => l.startsWith("error:"))).toBe(true);
+    store.close();
+  });
+});
+
+describe("on-demand review on done sessions", () => {
+  it("done WITHOUT pr_url keeps the old re-assign reply", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_od1", "done", "iss");
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
+    await orch.onPrompted(ctxFor("as_od1"), "can you review it?");
+    expect(log.length).toBe(1);
+    expect(log[0]).toMatch(/^response:/);
+    expect(log[0]).toContain("re-assign");
+    store.close();
+  });
+
+  it("'stop' on done-with-PR closes politely without a review run", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_od2", "done", "iss");
+    store.setPrUrl("as_od2", "https://github.com/o/r/pull/1");
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
+    await orch.onPrompted(ctxFor("as_od2"), "stop");
+    expect(log.length).toBe(1);
+    expect(log[0]).toMatch(/^response:/);
+    expect(store.get("as_od2")?.phase).toBe("done");
+    store.close();
+  });
+
+  it("reconcile finishes a review row: report posted, review stored, phase done", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_od3", "review", "iss");
+    store.setSandbox("as_od3", "sbx_r");
+    const log: string[] = [];
+    const report = "## Review\n\nfindings...\n\n_Report only — no changes were made._";
+    const result = JSON.stringify({ kind: "result", subtype: "success", text: report, costUsd: null, sessionId: null });
+    const orch = new Orchestrator(
+      { targetRepo: "o/r" } as Config, store, () => fakeActs(log),
+      undefined, async () => fakeReconnected(result),
+    );
+    await orch.reconcile();
+    const row = store.get("as_od3");
+    expect(row?.phase).toBe("done");
+    expect(row?.review).toBe(report);
+    expect(log.some((l) => l.startsWith("response:"))).toBe(true);
+    store.close();
+  });
+
+  it("reconcile of a review row with no sandbox goes back to done (not error)", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_od4", "review", "iss");
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
+    await orch.reconcile();
+    expect(store.get("as_od4")?.phase).toBe("done");
+    expect(log.some((l) => l.startsWith("error:"))).toBe(true);
     store.close();
   });
 });

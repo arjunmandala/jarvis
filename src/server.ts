@@ -37,18 +37,25 @@ export function makeServer(config: Config): Hono {
     const acts = makeActivities(linear, ctx.agentSessionId);
     console.log(`[webhook] AgentSessionEvent action=${action} session=${ctx.agentSessionId} issue=${JSON.stringify(ctx.title)}`);
 
-    if (inflight.has(ctx.agentSessionId)) {
-      console.log(`[skip] ${ctx.agentSessionId} already processing — dropping ${action}`);
-      return;
-    }
-
     if (action === "created") {
+      if (inflight.has(ctx.agentSessionId)) {
+        console.log(`[skip] ${ctx.agentSessionId} already processing — dropping ${action}`);
+        return;
+      }
       inflight.add(ctx.agentSessionId);
       await acts.thought("On it — taking a look."); // 10s rule
       store.upsert(ctx.agentSessionId, "clarify", ctx.issueId);
       void orchestrator
         .onCreated(ctx)
         .catch((e) => {
+          // A "stop" mid-run kills the sandbox, which makes the in-flight
+          // runAgent command reject here with a transport error. steer()
+          // already posted "Stopped mid-run." for this session — don't post
+          // a contradictory error right after it; just log for diagnostics.
+          if (store.get(ctx.agentSessionId)?.phase === "done") {
+            console.error(`[error] onCreated ${ctx.agentSessionId} (suppressed, session already stopped):`, e?.message ?? e);
+            return;
+          }
           console.error(`[error] onCreated ${ctx.agentSessionId}:`, e?.message ?? e);
           acts.error(String(e?.message ?? e)).catch(() => undefined);
         })
@@ -62,10 +69,29 @@ export function makeServer(config: Config): Hono {
         return;
       }
       console.log(`[webhook] prompted reply=${JSON.stringify(reply.slice(0, 80))}`);
+      // A comment while a run is live steers the running agent — it must NOT be
+      // dropped by the inflight guard (the run itself holds that flag).
+      if (orchestrator.hasLive(ctx.agentSessionId)) {
+        void orchestrator.steer(ctx, reply).catch((e) => {
+          console.error(`[error] steer ${ctx.agentSessionId}:`, e?.message ?? e);
+          acts.error(String(e?.message ?? e)).catch(() => undefined);
+        });
+        return;
+      }
+      if (inflight.has(ctx.agentSessionId)) {
+        console.log(`[skip] ${ctx.agentSessionId} already processing — dropping ${action}`);
+        return;
+      }
       inflight.add(ctx.agentSessionId);
       void orchestrator
         .onPrompted(ctx, reply)
         .catch((e) => {
+          // Same stop-kill race as onCreated above: don't contradict a
+          // "Stopped mid-run." post with a follow-up error.
+          if (store.get(ctx.agentSessionId)?.phase === "done") {
+            console.error(`[error] onPrompted ${ctx.agentSessionId} (suppressed, session already stopped):`, e?.message ?? e);
+            return;
+          }
           console.error(`[error] onPrompted ${ctx.agentSessionId}:`, e?.message ?? e);
           acts.error(String(e?.message ?? e)).catch(() => undefined);
         })

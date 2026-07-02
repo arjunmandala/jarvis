@@ -1,11 +1,12 @@
 import type { Config } from "../config.ts";
-import type { SessionStore, Phase } from "../store/sessions.ts";
+import type { SessionStore, Phase, SessionRow } from "../store/sessions.ts";
 import type { Activities } from "../linear/activities.ts";
 import type { IssueContext } from "../linear/context.ts";
 import { APPROVAL_FOOTER } from "../linear/context.ts";
-import { withSandbox, cloneRepo, runAgent, watchDetached, type AgentSandbox } from "../sandbox/session.ts";
+import { withSandbox, cloneRepo, runAgent, watchDetached, injectMessage, runCommand, REPO_DIR, type AgentSandbox } from "../sandbox/session.ts";
 import { Sandbox } from "e2b";
-import { planTask, implementTask, mapTask } from "../agent/tasks.ts";
+import { planTask, implementTask, mapTask, reviseTask, reviewTask } from "../agent/tasks.ts";
+import type { AgentTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
 
 // Phase 4.1: surface the run's dollar cost inline in the Linear activity when
@@ -13,6 +14,26 @@ import type { JarvisEvent } from "../agent/events.ts";
 export function costLine(result: JarvisEvent | null): string {
   if (result?.kind !== "result" || result.costUsd == null) return "";
   return `\n\n_Cost: $${result.costUsd.toFixed(4)}_`;
+}
+
+// A PR URL is a single-line http(s) URL. Anything else — notably a markdown
+// review report that a self-review run wrote over RESULT_FILE — must never be
+// stored as pr_url or announced as the PR.
+export const PR_URL_RE = /^https?:\/\/\S+$/;
+
+// Self-review trigger: a diff bigger than either bound gets an automatic
+// review pass before the PR is announced. Deterministic, no model call.
+export const REVIEW_MAX_FILES = 5;
+export const REVIEW_MAX_LINES = 200;
+
+// Parses `git diff --shortstat` output, e.g.
+// " 12 files changed, 340 insertions(+), 12 deletions(-)".
+// Unparseable input returns false — no review rather than a spurious one.
+export function diffExceedsThreshold(shortstat: string): boolean {
+  const files = Number(/(\d+) files? changed/.exec(shortstat)?.[1] ?? 0);
+  const insertions = Number(/(\d+) insertions?\(\+\)/.exec(shortstat)?.[1] ?? 0);
+  const deletions = Number(/(\d+) deletions?\(-\)/.exec(shortstat)?.[1] ?? 0);
+  return files > REVIEW_MAX_FILES || insertions + deletions > REVIEW_MAX_LINES;
 }
 
 export function nextPhase(current: Phase, approved: boolean): Phase {
@@ -64,6 +85,14 @@ export class Orchestrator {
   #makeActs: (agentSessionId: string) => Activities;
   #fetchPlan?: (agentSessionId: string) => Promise<string | null>;
   #connect: (sandboxId: string) => Promise<Reconnected>;
+  // Live runs: comments arriving while a run executes are injected into its
+  // sandbox (steering). In-memory like the server's inflight set — a restart
+  // loses steering ability for that run, which reconcile already fails/recovers.
+  #live = new Map<string, { sbx: AgentSandbox; kill: () => Promise<unknown>; replyPending: boolean; runId: number | null }>();
+
+  hasLive(agentSessionId: string): boolean {
+    return this.#live.has(agentSessionId);
+  }
 
   constructor(
     config: Config,
@@ -89,38 +118,108 @@ export class Orchestrator {
     };
   }
 
-  #logUsage(label: string, result: JarvisEvent | null): void {
-    if (result?.kind !== "result") return;
-    const u = result.usage ?? {};
-    const inTok = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-    const cost = result.costUsd != null ? `$${result.costUsd.toFixed(4)}` : "n/a";
-    console.log(
-      `[cost] ${label} ${result.subtype} — cost=${cost} turns=${result.numTurns ?? "?"} ` +
-        `tokens in=${inTok} (cache_read=${u.cache_read_input_tokens ?? 0}) out=${u.output_tokens ?? 0}`,
-    );
+  #record(runId: number | null, e: JarvisEvent): void {
+    if (runId == null) return;
+    try {
+      this.#store.addRunEvent(runId, e.kind, e);
+    } catch (err) {
+      console.error(`[telemetry] addRunEvent failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
-  #relay(acts: Activities) {
+  #logUsage(label: string, result: JarvisEvent | null, runId?: number | null): void {
+    if (result?.kind === "result") {
+      const u = result.usage ?? {};
+      const inTok = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+      const cost = result.costUsd != null ? `$${result.costUsd.toFixed(4)}` : "n/a";
+      console.log(
+        `[cost] ${label} ${result.subtype} — cost=${cost} turns=${result.numTurns ?? "?"} ` +
+          `tokens in=${inTok} (cache_read=${u.cache_read_input_tokens ?? 0}) out=${u.output_tokens ?? 0}`,
+      );
+    }
+    if (runId == null) return;
+    try {
+      const outcome =
+        result == null ? "no_result"
+        : result.kind === "error" ? "error"
+        : result.kind !== "result" ? "no_result"
+        : result.text?.trim().startsWith("PR_FAILED:") ? "pr_failed"
+        : result.subtype;
+      const u = result?.kind === "result" ? result.usage ?? {} : {};
+      this.#store.finishRun(runId, {
+        outcome,
+        costUsd: result?.kind === "result" ? result.costUsd : null,
+        numTurns: result?.kind === "result" ? (result.numTurns ?? null) : null,
+        tokensIn: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
+        tokensOut: u.output_tokens ?? 0,
+        tokensCacheRead: u.cache_read_input_tokens ?? 0,
+        error: result?.kind === "error" ? result.message : null,
+      });
+    } catch (err) {
+      console.error(`[telemetry] finishRun failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  #relay(acts: Activities, sessionId: string, runId: number | null) {
     return async (e: JarvisEvent) => {
+      this.#record(runId, e);
       try {
         if (e.kind === "tool_use") {
           const param = toolParameter(e.input) || String(e.name);
           console.log(`[agent] tool_use ${e.name} → ${param.slice(0, 120)}`);
           // Linear requires action activities to carry a non-empty `parameter`.
           await acts.action(String(e.name), param);
+        } else if (e.kind === "ask_user") {
+          console.log(`[agent] ask_user: ${e.question.slice(0, 120)}`);
+          const live = this.#live.get(sessionId);
+          if (live) live.replyPending = true;
+          await acts.elicitation(
+            `**Jarvis asks:**\n\n${e.question}\n\n_Reply within 10 minutes — after that I proceed on my best judgment._`,
+          );
         } else if (e.kind === "error") {
           console.error(`[agent] error: ${e.message}`);
           await acts.error(e.message);
         } else if (e.kind === "assistant_text") {
           console.log(`[agent] text: ${e.text.slice(0, 120).replace(/\n/g, " ")}`);
+          // Normally not posted per-block (too noisy) — but the first text after
+          // a steering message or ask_user answer is the agent's reply: post it.
+          const live = this.#live.get(sessionId);
+          if (live?.replyPending && e.text.trim()) {
+            live.replyPending = false;
+            await acts.response(e.text);
+          }
         }
-        // assistant_text is logged (above) but intentionally not posted per-block
-        // to Linear (too noisy); the final plan/PR text is posted from the result.
+        // tool_result is recorded above but never posted — pure telemetry.
       } catch (err) {
         // A single failed activity post must not crash the run.
         console.error(`[relay] failed to post activity for ${e.kind}: ${err instanceof Error ? err.message : String(err)}`);
       }
     };
+  }
+
+  // Runs one agent task with telemetry (runs row + events) and live-steering
+  // registration. Sandbox lifetime is managed by the caller's withSandbox.
+  async #trackedRun(
+    sessionId: string,
+    taskType: string,
+    sbx: Sandbox,
+    task: AgentTask,
+    acts: Activities,
+  ): Promise<JarvisEvent | null> {
+    let runId: number | null = null;
+    try {
+      runId = this.#store.createRun(sessionId, taskType, this.#config.targetRepo);
+    } catch (err) {
+      console.error(`[telemetry] createRun failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    this.#live.set(sessionId, { sbx, kill: () => sbx.kill(), replyPending: false, runId });
+    try {
+      const { result } = await runAgent(sbx, this.#config.anthropicApiKey, task, this.#relay(acts, sessionId, runId));
+      this.#logUsage(`${taskType} ${sessionId}`, result, runId);
+      return result;
+    } finally {
+      this.#live.delete(sessionId);
+    }
   }
 
   // created: clarify (implicit) -> produce plan -> post as elicitation -> await approval
@@ -130,7 +229,7 @@ export class Orchestrator {
     console.log(`[phase] ${ctx.agentSessionId} → plan (cloning + drafting)`);
     await acts.thought("Reading the codebase to draft a plan…");
 
-    const { result } = await withSandbox(this.#sbxCfg(), async (sbx) => {
+    const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       await cloneRepo(sbx, this.#sbxCfg());
 
@@ -138,8 +237,7 @@ export class Orchestrator {
       if (!map) {
         await acts.thought("First time in this repo — mapping it for faster future runs…");
         try {
-          const { result: mapResult } = await runAgent(sbx, this.#config.anthropicApiKey, mapTask(), this.#relay(acts));
-          this.#logUsage(`map ${ctx.agentSessionId}`, mapResult);
+          const mapResult = await this.#trackedRun(ctx.agentSessionId, "map", sbx, mapTask(), acts);
           if (mapResult?.kind === "result" && mapResult.text && mapResult.text.trim()) {
             map = mapResult.text;
             this.#store.setRepoMap(this.#config.targetRepo, map);
@@ -150,7 +248,7 @@ export class Orchestrator {
         }
       }
 
-      return runAgent(sbx, this.#config.anthropicApiKey, planTask(ctx, map), this.#relay(acts));
+      return this.#trackedRun(ctx.agentSessionId, "plan", sbx, planTask(ctx, map), acts);
     });
 
     await this.#finishPlan(ctx.agentSessionId, acts, result);
@@ -160,7 +258,9 @@ export class Orchestrator {
   // advance to await_approval — or fail loud if no plan was produced. Called
   // from onCreated and, after a restart, from reconcile.
   async #finishPlan(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
-    this.#logUsage(`plan ${agentSessionId}`, result);
+    // A mid-run "stop" (steer) already closed the session; don't overwrite done
+    // with error/await_approval when the killed run's null result lands here.
+    if (this.#store.get(agentSessionId)?.phase === "done") return;
     const plan = result?.kind === "result" && result.text ? result.text : null;
     console.log(`[phase] ${agentSessionId} plan run finished (plan=${plan ? plan.length + " chars" : "NONE"})`);
     if (!plan) {
@@ -181,6 +281,10 @@ export class Orchestrator {
     if (!row || row.phase !== "await_approval") {
       // Terminal activities only — a `thought` would leave Linear stuck on "working".
       const phase = row?.phase ?? "unknown";
+      if (phase === "done" && row?.prUrl) {
+        await this.#onDoneFollowUp(ctx, row, replyText, acts);
+        return;
+      }
       console.log(`[skip] ${ctx.agentSessionId} prompted but phase=${phase} — replying with status`);
       if (phase === "done") {
         await acts.response("This task is already done — re-assign the issue to start something new.");
@@ -204,58 +308,204 @@ export class Orchestrator {
       }
       return;
     }
-    if (!approved) {
-      console.log(`[phase] ${ctx.agentSessionId} reply parsed as NOT approval — staying in await_approval`);
-      // Elicitation puts the session back into "awaiting input" instead of "working".
-      await acts.elicitation("Understood — not implementing yet. Reply 'approve' when ready, or 'stop' to cancel.");
-      return;
-    }
+    // Hoisted above the approved/not-approved branch: both the revision path
+    // (feedback) and the implement path (approved) need the current plan.
     let plan = row.plan;
     if (!plan || !plan.trim()) {
       plan = await recoverPlan(this.#store, ctx.agentSessionId, this.#fetchPlan);
     }
     if (!plan || !plan.trim()) {
-      console.error(`[phase] ${ctx.agentSessionId} approved but plan is missing — refusing to implement blind`);
+      console.error(`[phase] ${ctx.agentSessionId} plan is missing — refusing to proceed blind`);
       await this.#failLoud(
         ctx.agentSessionId, acts,
         "I lost the plan for this session (likely a restart before it was saved). Re-assign the issue and I'll plan again.",
       );
       return;
     }
+
+    if (!approved) {
+      console.log(`[phase] ${ctx.agentSessionId} reply parsed as feedback — revising the plan`);
+      // Same phase as the original plan run so boot reconciliation recovers a
+      // revision run exactly like a plan run (re-attaches, calls #finishPlan).
+      this.#store.setPhase(ctx.agentSessionId, "plan");
+      await acts.thought("Revising the plan per your feedback…");
+
+      const map = this.#store.getRepoMap(this.#config.targetRepo);
+      const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
+        this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
+        await cloneRepo(sbx, this.#sbxCfg());
+        return this.#trackedRun(ctx.agentSessionId, "revise", sbx, reviseTask(ctx, plan, replyText, map), acts);
+      });
+
+      await this.#finishPlan(ctx.agentSessionId, acts, result);
+      return;
+    }
+
     this.#store.setPhase(ctx.agentSessionId, "implement");
     console.log(`[phase] ${ctx.agentSessionId} → implement (approved)`);
     await acts.thought("Approved — implementing in a sandbox now.");
 
     const map = this.#store.getRepoMap(this.#config.targetRepo);
-    const { result } = await withSandbox(this.#sbxCfg(), async (sbx) => {
+    let review: string | null = null;
+    const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       await cloneRepo(sbx, this.#sbxCfg());
-      return runAgent(sbx, this.#config.anthropicApiKey, implementTask(ctx, plan, map), this.#relay(acts));
+      const r = await this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map), acts);
+      // Persist the PR URL BEFORE self-review: the review run deletes and
+      // rewrites RESULT_FILE, so a restart (or stop) during self-review would
+      // otherwise lose the PR — or worse, reconcile would recover the review
+      // report and feed it to #finishImplement as if it were the PR URL.
+      const prText = r?.kind === "result" && r.text ? r.text.trim() : "";
+      if (PR_URL_RE.test(prText)) this.#store.setPrUrl(ctx.agentSessionId, prText);
+      review = await this.#maybeSelfReview(ctx, sbx, r, plan, map, acts);
+      return r;
     });
 
-    await this.#finishImplement(ctx.agentSessionId, acts, result);
+    await this.#finishImplement(ctx.agentSessionId, acts, result, review);
+  }
+
+  // A comment arrived while a run is live. stop kills it; anything else is
+  // injected into the running agent's inbox and its next reply posts back.
+  async steer(ctx: IssueContext, replyText: string): Promise<void> {
+    const acts = this.#makeActs(ctx.agentSessionId);
+    const live = this.#live.get(ctx.agentSessionId);
+    if (!live) {
+      await acts.response("That run just finished — I couldn't pass your message to it. Reply again and I'll handle it.");
+      return;
+    }
+    if (parseStopGate(replyText)) {
+      console.log(`[steer] ${ctx.agentSessionId} stop requested mid-run — killing sandbox`);
+      this.#store.setPhase(ctx.agentSessionId, "done");
+      await acts.response("Stopped mid-run. Re-assign the issue to start over.");
+      await live.kill().catch(() => undefined);
+      return;
+    }
+    this.#record(live.runId, { kind: "user_message", text: replyText });
+    live.replyPending = true;
+    try {
+      await injectMessage(live.sbx, replyText);
+    } catch (err) {
+      live.replyPending = false;
+      await acts.error(`I couldn't pass your message to the running agent: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    await acts.thought("Got it — passing your message to the running agent.");
   }
 
   // Everything after the implement run: post the PR (done) or the failure
   // (error). Called from onPrompted and, after a restart, from reconcile.
-  async #finishImplement(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
-    this.#logUsage(`implement ${agentSessionId}`, result);
+  async #finishImplement(
+    agentSessionId: string,
+    acts: Activities,
+    result: JarvisEvent | null,
+    review: string | null = null,
+  ): Promise<void> {
+    // A mid-run "stop" (steer) already closed the session; don't overwrite done
+    // with error/await_approval when the killed run's null result lands here.
+    if (this.#store.get(agentSessionId)?.phase === "done") return;
     const text = result?.kind === "result" && result.text ? result.text.trim() : "";
     if (text.startsWith("PR_FAILED:")) {
       console.error(`[phase] ${agentSessionId} → error (PR creation failed: ${text.slice(0, 100)})`);
       await this.#failLoud(agentSessionId, acts, `PR could not be opened: ${text.slice("PR_FAILED:".length).trim()}`);
-    } else if (result?.kind === "result" && result.text) {
+    } else if (result?.kind === "result" && result.text && PR_URL_RE.test(text)) {
       console.log(`[phase] ${agentSessionId} → done (PR: ${result.text.slice(0, 100)})`);
+      this.#store.setPrUrl(agentSessionId, text);
+      if (review) this.#store.setReview(agentSessionId, review);
       try {
         await acts.response(`Done. PR opened:\n\n${result.text}\n\n_A human review + merge closes this out._${costLine(result)}`);
+        if (review) await acts.response(`**Self-review of the diff** (advisory — the PR is unchanged):\n\n${review}`);
       } catch (err) {
         console.error(`[phase] ${agentSessionId} failed to post done activity: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         this.#store.setPhase(agentSessionId, "done");
       }
+    } else if (result?.kind === "result" && result.text) {
+      // A result that isn't a single-line URL (e.g. a self-review report that
+      // overwrote RESULT_FILE and got recovered by reconcile) is NOT a PR.
+      console.error(`[phase] ${agentSessionId} → error (implement finished without a PR URL: ${text.slice(0, 100).replace(/\n/g, " ")})`);
+      await this.#failLoud(agentSessionId, acts, "Implement finished without a PR URL. Re-assign the issue to retry, or check GitHub — the PR may already exist.");
     } else {
       console.error(`[phase] ${agentSessionId} → error (implement did not complete)`);
       await this.#failLoud(agentSessionId, acts, result?.kind === "error" ? result.message : "Implementation did not complete.");
+    }
+  }
+
+  // A reply on a finished session that has a PR: conversational follow-up.
+  // "stop" closes politely; anything else runs a review agent against the PR
+  // diff with the user's message as steering ("review this" reviews; a
+  // question gets answered in the diff's context).
+  async #onDoneFollowUp(ctx: IssueContext, row: SessionRow, replyText: string, acts: Activities): Promise<void> {
+    if (parseStopGate(replyText)) {
+      console.log(`[phase] ${ctx.agentSessionId} done follow-up: stop — staying done`);
+      await acts.response("Understood — closing this out. The PR is waiting on human review.");
+      return;
+    }
+    console.log(`[phase] ${ctx.agentSessionId} done → review (follow-up on ${row.prUrl})`);
+    this.#store.setPhase(ctx.agentSessionId, "review");
+    // Fire-and-forget: thought is one-shot telemetry, and a rejection here
+    // (outside the try/catch) would wedge the session in `review`.
+    void acts.thought("Looking at the PR diff…").catch(() => {});
+    const map = this.#store.getRepoMap(this.#config.targetRepo);
+    let result: JarvisEvent | null = null;
+    try {
+      result = await withSandbox(this.#sbxCfg(), async (sbx) => {
+        this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
+        await cloneRepo(sbx, this.#sbxCfg());
+        return this.#trackedRun(ctx.agentSessionId, "review", sbx, reviewTask(ctx, row.prUrl!, row.plan, replyText, map), acts);
+      });
+    } catch (err) {
+      console.error(`[review] ${ctx.agentSessionId} review run failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    await this.#finishReview(ctx.agentSessionId, acts, result);
+  }
+
+  // Review always returns the session to done — a failed review is retryable
+  // by replying again, never a wedged `error` session.
+  async #finishReview(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
+    // A mid-run "stop" (steer) already set the session to done and killed the
+    // sandbox — don't post a contradictory error when the killed run's null
+    // result lands here. (Early return, so the finally's setPhase never runs.)
+    if (this.#store.get(agentSessionId)?.phase === "done") return;
+    const report = result?.kind === "result" && result.text ? result.text : null;
+    try {
+      if (report) {
+        console.log(`[phase] ${agentSessionId} review → done (${report.length} chars)`);
+        this.#store.setReview(agentSessionId, report);
+        await acts.response(`${report}${costLine(result)}`);
+      } else {
+        console.error(`[phase] ${agentSessionId} review produced no report`);
+        await acts.error("I couldn't complete the review — reply again to retry.");
+      }
+    } catch (err) {
+      console.error(`[review] ${agentSessionId} failed to post review activity: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      this.#store.setPhase(agentSessionId, "done");
+    }
+  }
+
+  // Self-review: after an implement run that produced a PR, size the diff in
+  // the SAME sandbox (branch still checked out); over threshold, run a review
+  // task and return its report. Advisory only — every failure path returns
+  // null and never throws, and the PR announcement is unaffected.
+  async #maybeSelfReview(
+    ctx: IssueContext,
+    sbx: Sandbox,
+    result: JarvisEvent | null,
+    plan: string,
+    map: string | undefined,
+    acts: Activities,
+  ): Promise<string | null> {
+    const prUrl = result?.kind === "result" && result.text ? result.text.trim() : "";
+    if (!prUrl.startsWith("http")) return null;
+    try {
+      const stat = await runCommand(sbx, `cd ${REPO_DIR} && git diff origin/HEAD... --shortstat`);
+      if (stat.exitCode !== 0 || !diffExceedsThreshold(stat.stdout)) return null;
+      await acts.thought("Big diff — running a self-review before handing off…");
+      const r = await this.#trackedRun(ctx.agentSessionId, "review", sbx, reviewTask(ctx, prUrl, plan, null, map), acts);
+      return r?.kind === "result" && r.text ? r.text : null;
+    } catch (err) {
+      console.error(`[review] ${ctx.agentSessionId} self-review failed (advisory, continuing): ${err instanceof Error ? err.message : String(err)}`);
+      return null;
     }
   }
 
@@ -276,23 +526,24 @@ export class Orchestrator {
   // For every row still in a run phase (plan/implement), either recover it by
   // re-attaching to its sandbox, or fail it loud so the human can re-assign.
   // Race note: a `prompted` webhook arriving while a session is being reconciled
-  // cannot double-run it — onPrompted only acts in phase await_approval, and
-  // reconciled rows are in plan/implement until #finish* moves them.
+  // cannot double-run it — onPrompted only acts in phase await_approval (plus
+  // done-with-PR follow-ups, which require phase=done), and reconciled rows stay
+  // in plan/implement/review until #finish* moves them.
   async reconcile(): Promise<void> {
-    const rows = this.#store.listByPhase("plan", "implement");
+    const rows = this.#store.listByPhase("plan", "implement", "review");
     if (rows.length === 0) return;
     console.log(`[reconcile] ${rows.length} in-flight session(s) to reconcile`);
     await Promise.allSettled(
       rows.map(async (row) => {
         const id = row.agentSessionId;
         const acts = this.#makeActs(id);
+        // review is advisory: recover to done (retryable by replying), not error
+        const fail = (message: string) =>
+          row.phase === "review" ? this.#finishReview(id, acts, null) : this.#failLoud(id, acts, message);
         try {
           if (!row.sandboxId) {
             console.log(`[reconcile] ${id} phase=${row.phase} has no sandboxId — failing loud`);
-            await this.#failLoud(
-              id, acts,
-              "A restart interrupted this run before its sandbox was recorded — re-assign the issue to retry.",
-            );
+            await fail("A restart interrupted this run before its sandbox was recorded — re-assign the issue to retry.");
             return;
           }
           console.log(`[reconcile] ${id} phase=${row.phase} re-attaching to sandbox ${row.sandboxId}`);
@@ -301,19 +552,22 @@ export class Orchestrator {
             sbx = await this.#connect(row.sandboxId);
           } catch (err) {
             console.error(`[reconcile] ${id} connect failed: ${err instanceof Error ? err.message : String(err)}`);
-            await this.#failLoud(id, acts, "A restart interrupted this run — re-assign the issue to retry.");
+            await fail("A restart interrupted this run — re-assign the issue to retry.");
             return;
           }
           try {
             const result = await watchDetached(sbx);
             if (!result) {
               console.log(`[reconcile] ${id} no result recovered from sandbox — failing loud`);
-              await this.#failLoud(id, acts, "A restart interrupted this run — re-assign the issue to retry.");
+              await fail("A restart interrupted this run — re-assign the issue to retry.");
               return;
             }
             console.log(`[reconcile] ${id} recovered result (${result.kind}) — finishing phase=${row.phase}`);
+            this.#logUsage(`reconcile ${id}`, result);
             if (row.phase === "plan") {
               await this.#finishPlan(id, acts, result);
+            } else if (row.phase === "review") {
+              await this.#finishReview(id, acts, result);
             } else {
               await this.#finishImplement(id, acts, result);
             }

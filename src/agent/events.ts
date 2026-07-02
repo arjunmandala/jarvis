@@ -1,6 +1,9 @@
 export type JarvisEvent =
   | { kind: "assistant_text"; text: string }
   | { kind: "tool_use"; name: string; input: unknown }
+  | { kind: "tool_result"; tool: string | null; isError: boolean; content: string }
+  | { kind: "ask_user"; question: string }
+  | { kind: "user_message"; text: string }
   | {
       kind: "result";
       subtype: string;
@@ -17,7 +20,7 @@ export type JarvisEvent =
     }
   | { kind: "error"; message: string };
 
-const KINDS = new Set(["assistant_text", "tool_use", "result", "error"]);
+const KINDS = new Set(["assistant_text", "tool_use", "tool_result", "ask_user", "result", "error"]);
 
 function parseLine(line: string): JarvisEvent | null {
   const trimmed = line.trim();

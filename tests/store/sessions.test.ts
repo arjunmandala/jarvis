@@ -112,3 +112,57 @@ describe("SessionStore", () => {
     });
   });
 });
+
+describe("run telemetry", () => {
+  it("createRun returns an id and finishRun records the outcome", () => {
+    const store = new SessionStore(":memory:");
+    const runId = store.createRun("as_t1", "plan", "owner/repo");
+    expect(runId).toBeGreaterThan(0);
+    store.finishRun(runId, {
+      outcome: "success", costUsd: 0.5, numTurns: 12,
+      tokensIn: 1000, tokensOut: 200, tokensCacheRead: 800, error: null,
+    });
+    // second run gets a distinct id
+    expect(store.createRun("as_t1", "implement", "owner/repo")).toBe(runId + 1);
+    store.close();
+  });
+
+  it("addRunEvent stores JSON payloads per run", () => {
+    const store = new SessionStore(":memory:");
+    const runId = store.createRun("as_t2", "plan", null);
+    store.addRunEvent(runId, "tool_use", { name: "Bash", input: { command: "ls" } });
+    store.addRunEvent(runId, "tool_result", { tool: "Bash", isError: true, content: "boom" });
+    // no assert on retrieval API — the report script reads SQL directly; just prove no throw
+    store.close();
+  });
+});
+
+describe("pr_url and review columns", () => {
+  it("round-trips pr_url and review through setters", () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_r1", "done", "iss");
+    store.setPrUrl("as_r1", "https://github.com/o/r/pull/7");
+    store.setReview("as_r1", "## Review\n\nLooks fine.");
+    const row = store.get("as_r1");
+    expect(row?.prUrl).toBe("https://github.com/o/r/pull/7");
+    expect(row?.review).toBe("## Review\n\nLooks fine.");
+    store.close();
+  });
+
+  it("defaults both to null on new rows", () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_r2", "plan", "iss");
+    const row = store.get("as_r2");
+    expect(row?.prUrl).toBeNull();
+    expect(row?.review).toBeNull();
+    store.close();
+  });
+
+  it("lists sessions in the review phase", () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_r3", "review", "iss");
+    const rows = store.listByPhase("review");
+    expect(rows.map((r) => r.agentSessionId)).toEqual(["as_r3"]);
+    store.close();
+  });
+});
