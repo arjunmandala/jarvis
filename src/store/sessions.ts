@@ -11,6 +11,16 @@ export interface SessionRow {
   updatedAt: string;
 }
 
+export interface RunFinish {
+  outcome: string;
+  costUsd: number | null;
+  numTurns: number | null;
+  tokensIn: number;
+  tokensOut: number;
+  tokensCacheRead: number;
+  error: string | null;
+}
+
 export class SessionStore {
   #db: DatabaseSync;
 
@@ -39,6 +49,32 @@ export class SessionStore {
         updated_at TEXT NOT NULL
       ) STRICT
     `);
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS runs (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_session_id  TEXT NOT NULL,
+        task_type         TEXT NOT NULL,
+        repo              TEXT,
+        started_at        TEXT NOT NULL,
+        ended_at          TEXT,
+        outcome           TEXT,
+        cost_usd          REAL,
+        num_turns         INTEGER,
+        tokens_in         INTEGER,
+        tokens_out        INTEGER,
+        tokens_cache_read INTEGER,
+        error             TEXT
+      ) STRICT
+    `);
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS run_events (
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id  INTEGER NOT NULL,
+        ts      TEXT NOT NULL,
+        type    TEXT NOT NULL,
+        payload TEXT NOT NULL
+      ) STRICT
+    `);
   }
 
   getRepoMap(repo: string): string | undefined {
@@ -57,6 +93,32 @@ export class SessionStore {
          DO UPDATE SET map = excluded.map, updated_at = excluded.updated_at`,
       )
       .run(repo, map, new Date().toISOString());
+  }
+
+  createRun(agentSessionId: string, taskType: string, repo: string | null): number {
+    const r = this.#db
+      .prepare(`INSERT INTO runs (agent_session_id, task_type, repo, started_at) VALUES (?, ?, ?, ?)`)
+      .run(agentSessionId, taskType, repo, new Date().toISOString());
+    return Number(r.lastInsertRowid);
+  }
+
+  addRunEvent(runId: number, type: string, payload: unknown): void {
+    this.#db
+      .prepare(`INSERT INTO run_events (run_id, ts, type, payload) VALUES (?, ?, ?, ?)`)
+      .run(runId, new Date().toISOString(), type, JSON.stringify(payload));
+  }
+
+  finishRun(runId: number, f: RunFinish): void {
+    this.#db
+      .prepare(
+        `UPDATE runs SET ended_at = ?, outcome = ?, cost_usd = ?, num_turns = ?,
+                tokens_in = ?, tokens_out = ?, tokens_cache_read = ?, error = ?
+         WHERE id = ?`,
+      )
+      .run(
+        new Date().toISOString(), f.outcome, f.costUsd, f.numTurns,
+        f.tokensIn, f.tokensOut, f.tokensCacheRead, f.error, runId,
+      );
   }
 
   upsert(agentSessionId: string, phase: Phase, issueId: string | null = null): void {

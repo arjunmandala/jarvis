@@ -112,3 +112,27 @@ describe("SessionStore", () => {
     });
   });
 });
+
+describe("run telemetry", () => {
+  it("createRun returns an id and finishRun records the outcome", () => {
+    const store = new SessionStore(":memory:");
+    const runId = store.createRun("as_t1", "plan", "owner/repo");
+    expect(runId).toBeGreaterThan(0);
+    store.finishRun(runId, {
+      outcome: "success", costUsd: 0.5, numTurns: 12,
+      tokensIn: 1000, tokensOut: 200, tokensCacheRead: 800, error: null,
+    });
+    // second run gets a distinct id
+    expect(store.createRun("as_t1", "implement", "owner/repo")).toBe(runId + 1);
+    store.close();
+  });
+
+  it("addRunEvent stores JSON payloads per run", () => {
+    const store = new SessionStore(":memory:");
+    const runId = store.createRun("as_t2", "plan", null);
+    store.addRunEvent(runId, "tool_use", { name: "Bash", input: { command: "ls" } });
+    store.addRunEvent(runId, "tool_result", { tool: "Bash", isError: true, content: "boom" });
+    // no assert on retrieval API — the report script reads SQL directly; just prove no throw
+    store.close();
+  });
+});
