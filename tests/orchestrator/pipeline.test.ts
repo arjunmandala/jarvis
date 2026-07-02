@@ -278,6 +278,23 @@ describe("reconcile", () => {
   });
 });
 
+describe("steer", () => {
+  it("hasLive is false and steer posts a terminal response when no run is live", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_s1", "implement", "iss");
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
+    expect(orch.hasLive("as_s1")).toBe(false);
+    await orch.steer(ctxFor("as_s1"), "actually use approach B");
+    expect(log.length).toBe(1);
+    expect(log[0]).toMatch(/^response:/);
+    store.close();
+  });
+  // The live path (inject + thought, stop-kill, ask_user elicitation, reply
+  // posting) runs inside withSandbox/runAgent — covered by live acceptance,
+  // matching the repo's convention for e2b paths.
+});
+
 describe("recoverPlan", () => {
   it("persists the recovered plan via store.setPlan and returns it", async () => {
     const store = new SessionStore(":memory:");

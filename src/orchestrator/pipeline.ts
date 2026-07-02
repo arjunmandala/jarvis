@@ -3,9 +3,10 @@ import type { SessionStore, Phase } from "../store/sessions.ts";
 import type { Activities } from "../linear/activities.ts";
 import type { IssueContext } from "../linear/context.ts";
 import { APPROVAL_FOOTER } from "../linear/context.ts";
-import { withSandbox, cloneRepo, runAgent, watchDetached, type AgentSandbox } from "../sandbox/session.ts";
+import { withSandbox, cloneRepo, runAgent, watchDetached, injectMessage, type AgentSandbox } from "../sandbox/session.ts";
 import { Sandbox } from "e2b";
 import { planTask, implementTask, mapTask, reviseTask } from "../agent/tasks.ts";
+import type { AgentTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
 
 // Phase 4.1: surface the run's dollar cost inline in the Linear activity when
@@ -64,6 +65,14 @@ export class Orchestrator {
   #makeActs: (agentSessionId: string) => Activities;
   #fetchPlan?: (agentSessionId: string) => Promise<string | null>;
   #connect: (sandboxId: string) => Promise<Reconnected>;
+  // Live runs: comments arriving while a run executes are injected into its
+  // sandbox (steering). In-memory like the server's inflight set — a restart
+  // loses steering ability for that run, which reconcile already fails/recovers.
+  #live = new Map<string, { sbx: AgentSandbox; kill: () => Promise<unknown>; replyPending: boolean; runId: number | null }>();
+
+  hasLive(agentSessionId: string): boolean {
+    return this.#live.has(agentSessionId);
+  }
 
   constructor(
     config: Config,
@@ -89,38 +98,108 @@ export class Orchestrator {
     };
   }
 
-  #logUsage(label: string, result: JarvisEvent | null): void {
-    if (result?.kind !== "result") return;
-    const u = result.usage ?? {};
-    const inTok = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-    const cost = result.costUsd != null ? `$${result.costUsd.toFixed(4)}` : "n/a";
-    console.log(
-      `[cost] ${label} ${result.subtype} — cost=${cost} turns=${result.numTurns ?? "?"} ` +
-        `tokens in=${inTok} (cache_read=${u.cache_read_input_tokens ?? 0}) out=${u.output_tokens ?? 0}`,
-    );
+  #record(runId: number | null, e: JarvisEvent): void {
+    if (runId == null) return;
+    try {
+      this.#store.addRunEvent(runId, e.kind, e);
+    } catch (err) {
+      console.error(`[telemetry] addRunEvent failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
-  #relay(acts: Activities) {
+  #logUsage(label: string, result: JarvisEvent | null, runId?: number | null): void {
+    if (result?.kind === "result") {
+      const u = result.usage ?? {};
+      const inTok = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+      const cost = result.costUsd != null ? `$${result.costUsd.toFixed(4)}` : "n/a";
+      console.log(
+        `[cost] ${label} ${result.subtype} — cost=${cost} turns=${result.numTurns ?? "?"} ` +
+          `tokens in=${inTok} (cache_read=${u.cache_read_input_tokens ?? 0}) out=${u.output_tokens ?? 0}`,
+      );
+    }
+    if (runId == null) return;
+    try {
+      const outcome =
+        result == null ? "no_result"
+        : result.kind === "error" ? "error"
+        : result.kind !== "result" ? "no_result"
+        : result.text?.trim().startsWith("PR_FAILED:") ? "pr_failed"
+        : result.subtype;
+      const u = result?.kind === "result" ? result.usage ?? {} : {};
+      this.#store.finishRun(runId, {
+        outcome,
+        costUsd: result?.kind === "result" ? result.costUsd : null,
+        numTurns: result?.kind === "result" ? (result.numTurns ?? null) : null,
+        tokensIn: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
+        tokensOut: u.output_tokens ?? 0,
+        tokensCacheRead: u.cache_read_input_tokens ?? 0,
+        error: result?.kind === "error" ? result.message : null,
+      });
+    } catch (err) {
+      console.error(`[telemetry] finishRun failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  #relay(acts: Activities, sessionId: string, runId: number | null) {
     return async (e: JarvisEvent) => {
+      this.#record(runId, e);
       try {
         if (e.kind === "tool_use") {
           const param = toolParameter(e.input) || String(e.name);
           console.log(`[agent] tool_use ${e.name} → ${param.slice(0, 120)}`);
           // Linear requires action activities to carry a non-empty `parameter`.
           await acts.action(String(e.name), param);
+        } else if (e.kind === "ask_user") {
+          console.log(`[agent] ask_user: ${e.question.slice(0, 120)}`);
+          const live = this.#live.get(sessionId);
+          if (live) live.replyPending = true;
+          await acts.elicitation(
+            `**Jarvis asks:**\n\n${e.question}\n\n_Reply within 10 minutes — after that I proceed on my best judgment._`,
+          );
         } else if (e.kind === "error") {
           console.error(`[agent] error: ${e.message}`);
           await acts.error(e.message);
         } else if (e.kind === "assistant_text") {
           console.log(`[agent] text: ${e.text.slice(0, 120).replace(/\n/g, " ")}`);
+          // Normally not posted per-block (too noisy) — but the first text after
+          // a steering message or ask_user answer is the agent's reply: post it.
+          const live = this.#live.get(sessionId);
+          if (live?.replyPending && e.text.trim()) {
+            live.replyPending = false;
+            await acts.response(e.text);
+          }
         }
-        // assistant_text is logged (above) but intentionally not posted per-block
-        // to Linear (too noisy); the final plan/PR text is posted from the result.
+        // tool_result is recorded above but never posted — pure telemetry.
       } catch (err) {
         // A single failed activity post must not crash the run.
         console.error(`[relay] failed to post activity for ${e.kind}: ${err instanceof Error ? err.message : String(err)}`);
       }
     };
+  }
+
+  // Runs one agent task with telemetry (runs row + events) and live-steering
+  // registration. Sandbox lifetime is managed by the caller's withSandbox.
+  async #trackedRun(
+    sessionId: string,
+    taskType: string,
+    sbx: Sandbox,
+    task: AgentTask,
+    acts: Activities,
+  ): Promise<JarvisEvent | null> {
+    let runId: number | null = null;
+    try {
+      runId = this.#store.createRun(sessionId, taskType, this.#config.targetRepo);
+    } catch (err) {
+      console.error(`[telemetry] createRun failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    this.#live.set(sessionId, { sbx, kill: () => sbx.kill(), replyPending: false, runId });
+    try {
+      const { result } = await runAgent(sbx, this.#config.anthropicApiKey, task, this.#relay(acts, sessionId, runId));
+      this.#logUsage(`${taskType} ${sessionId}`, result, runId);
+      return result;
+    } finally {
+      this.#live.delete(sessionId);
+    }
   }
 
   // created: clarify (implicit) -> produce plan -> post as elicitation -> await approval
@@ -130,7 +209,7 @@ export class Orchestrator {
     console.log(`[phase] ${ctx.agentSessionId} → plan (cloning + drafting)`);
     await acts.thought("Reading the codebase to draft a plan…");
 
-    const { result } = await withSandbox(this.#sbxCfg(), async (sbx) => {
+    const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       await cloneRepo(sbx, this.#sbxCfg());
 
@@ -138,8 +217,7 @@ export class Orchestrator {
       if (!map) {
         await acts.thought("First time in this repo — mapping it for faster future runs…");
         try {
-          const { result: mapResult } = await runAgent(sbx, this.#config.anthropicApiKey, mapTask(), this.#relay(acts));
-          this.#logUsage(`map ${ctx.agentSessionId}`, mapResult);
+          const mapResult = await this.#trackedRun(ctx.agentSessionId, "map", sbx, mapTask(), acts);
           if (mapResult?.kind === "result" && mapResult.text && mapResult.text.trim()) {
             map = mapResult.text;
             this.#store.setRepoMap(this.#config.targetRepo, map);
@@ -150,7 +228,7 @@ export class Orchestrator {
         }
       }
 
-      return runAgent(sbx, this.#config.anthropicApiKey, planTask(ctx, map), this.#relay(acts));
+      return this.#trackedRun(ctx.agentSessionId, "plan", sbx, planTask(ctx, map), acts);
     });
 
     await this.#finishPlan(ctx.agentSessionId, acts, result);
@@ -160,7 +238,9 @@ export class Orchestrator {
   // advance to await_approval — or fail loud if no plan was produced. Called
   // from onCreated and, after a restart, from reconcile.
   async #finishPlan(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
-    this.#logUsage(`plan ${agentSessionId}`, result);
+    // A mid-run "stop" (steer) already closed the session; don't overwrite done
+    // with error/await_approval when the killed run's null result lands here.
+    if (this.#store.get(agentSessionId)?.phase === "done") return;
     const plan = result?.kind === "result" && result.text ? result.text : null;
     console.log(`[phase] ${agentSessionId} plan run finished (plan=${plan ? plan.length + " chars" : "NONE"})`);
     if (!plan) {
@@ -227,10 +307,10 @@ export class Orchestrator {
       await acts.thought("Revising the plan per your feedback…");
 
       const map = this.#store.getRepoMap(this.#config.targetRepo);
-      const { result } = await withSandbox(this.#sbxCfg(), async (sbx) => {
+      const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
         this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
         await cloneRepo(sbx, this.#sbxCfg());
-        return runAgent(sbx, this.#config.anthropicApiKey, reviseTask(ctx, plan, replyText, map), this.#relay(acts));
+        return this.#trackedRun(ctx.agentSessionId, "revise", sbx, reviseTask(ctx, plan, replyText, map), acts);
       });
 
       await this.#finishPlan(ctx.agentSessionId, acts, result);
@@ -242,19 +322,49 @@ export class Orchestrator {
     await acts.thought("Approved — implementing in a sandbox now.");
 
     const map = this.#store.getRepoMap(this.#config.targetRepo);
-    const { result } = await withSandbox(this.#sbxCfg(), async (sbx) => {
+    const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       await cloneRepo(sbx, this.#sbxCfg());
-      return runAgent(sbx, this.#config.anthropicApiKey, implementTask(ctx, plan, map), this.#relay(acts));
+      return this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map), acts);
     });
 
     await this.#finishImplement(ctx.agentSessionId, acts, result);
   }
 
+  // A comment arrived while a run is live. stop kills it; anything else is
+  // injected into the running agent's inbox and its next reply posts back.
+  async steer(ctx: IssueContext, replyText: string): Promise<void> {
+    const acts = this.#makeActs(ctx.agentSessionId);
+    const live = this.#live.get(ctx.agentSessionId);
+    if (!live) {
+      await acts.response("That run just finished — I couldn't pass your message to it. Reply again and I'll handle it.");
+      return;
+    }
+    if (parseStopGate(replyText)) {
+      console.log(`[steer] ${ctx.agentSessionId} stop requested mid-run — killing sandbox`);
+      this.#store.setPhase(ctx.agentSessionId, "done");
+      await acts.response("Stopped mid-run. Re-assign the issue to start over.");
+      await live.kill().catch(() => undefined);
+      return;
+    }
+    this.#record(live.runId, { kind: "user_message", text: replyText });
+    live.replyPending = true;
+    try {
+      await injectMessage(live.sbx, replyText);
+    } catch (err) {
+      live.replyPending = false;
+      await acts.error(`I couldn't pass your message to the running agent: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    await acts.thought("Got it — passing your message to the running agent.");
+  }
+
   // Everything after the implement run: post the PR (done) or the failure
   // (error). Called from onPrompted and, after a restart, from reconcile.
   async #finishImplement(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
-    this.#logUsage(`implement ${agentSessionId}`, result);
+    // A mid-run "stop" (steer) already closed the session; don't overwrite done
+    // with error/await_approval when the killed run's null result lands here.
+    if (this.#store.get(agentSessionId)?.phase === "done") return;
     const text = result?.kind === "result" && result.text ? result.text.trim() : "";
     if (text.startsWith("PR_FAILED:")) {
       console.error(`[phase] ${agentSessionId} → error (PR creation failed: ${text.slice(0, 100)})`);
@@ -327,6 +437,7 @@ export class Orchestrator {
               return;
             }
             console.log(`[reconcile] ${id} recovered result (${result.kind}) — finishing phase=${row.phase}`);
+            this.#logUsage(`reconcile ${id}`, result);
             if (row.phase === "plan") {
               await this.#finishPlan(id, acts, result);
             } else {
