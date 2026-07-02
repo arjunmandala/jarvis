@@ -3,9 +3,9 @@ import type { SessionStore, Phase } from "../store/sessions.ts";
 import type { Activities } from "../linear/activities.ts";
 import type { IssueContext } from "../linear/context.ts";
 import { APPROVAL_FOOTER } from "../linear/context.ts";
-import { withSandbox, cloneRepo, runAgent, watchDetached, injectMessage, type AgentSandbox } from "../sandbox/session.ts";
+import { withSandbox, cloneRepo, runAgent, watchDetached, injectMessage, runCommand, REPO_DIR, type AgentSandbox } from "../sandbox/session.ts";
 import { Sandbox } from "e2b";
-import { planTask, implementTask, mapTask, reviseTask } from "../agent/tasks.ts";
+import { planTask, implementTask, mapTask, reviseTask, reviewTask } from "../agent/tasks.ts";
 import type { AgentTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
 
@@ -337,13 +337,16 @@ export class Orchestrator {
     await acts.thought("Approved — implementing in a sandbox now.");
 
     const map = this.#store.getRepoMap(this.#config.targetRepo);
+    let review: string | null = null;
     const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       await cloneRepo(sbx, this.#sbxCfg());
-      return this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map), acts);
+      const r = await this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map), acts);
+      review = await this.#maybeSelfReview(ctx, sbx, r, plan, map, acts);
+      return r;
     });
 
-    await this.#finishImplement(ctx.agentSessionId, acts, result);
+    await this.#finishImplement(ctx.agentSessionId, acts, result, review);
   }
 
   // A comment arrived while a run is live. stop kills it; anything else is
@@ -376,7 +379,12 @@ export class Orchestrator {
 
   // Everything after the implement run: post the PR (done) or the failure
   // (error). Called from onPrompted and, after a restart, from reconcile.
-  async #finishImplement(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
+  async #finishImplement(
+    agentSessionId: string,
+    acts: Activities,
+    result: JarvisEvent | null,
+    review: string | null = null,
+  ): Promise<void> {
     // A mid-run "stop" (steer) already closed the session; don't overwrite done
     // with error/await_approval when the killed run's null result lands here.
     if (this.#store.get(agentSessionId)?.phase === "done") return;
@@ -386,8 +394,11 @@ export class Orchestrator {
       await this.#failLoud(agentSessionId, acts, `PR could not be opened: ${text.slice("PR_FAILED:".length).trim()}`);
     } else if (result?.kind === "result" && result.text) {
       console.log(`[phase] ${agentSessionId} → done (PR: ${result.text.slice(0, 100)})`);
+      this.#store.setPrUrl(agentSessionId, text);
+      if (review) this.#store.setReview(agentSessionId, review);
       try {
         await acts.response(`Done. PR opened:\n\n${result.text}\n\n_A human review + merge closes this out._${costLine(result)}`);
+        if (review) await acts.response(`**Self-review of the diff** (advisory — the PR is unchanged):\n\n${review}`);
       } catch (err) {
         console.error(`[phase] ${agentSessionId} failed to post done activity: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
@@ -396,6 +407,32 @@ export class Orchestrator {
     } else {
       console.error(`[phase] ${agentSessionId} → error (implement did not complete)`);
       await this.#failLoud(agentSessionId, acts, result?.kind === "error" ? result.message : "Implementation did not complete.");
+    }
+  }
+
+  // Self-review: after an implement run that produced a PR, size the diff in
+  // the SAME sandbox (branch still checked out); over threshold, run a review
+  // task and return its report. Advisory only — every failure path returns
+  // null and never throws, and the PR announcement is unaffected.
+  async #maybeSelfReview(
+    ctx: IssueContext,
+    sbx: Sandbox,
+    result: JarvisEvent | null,
+    plan: string,
+    map: string | undefined,
+    acts: Activities,
+  ): Promise<string | null> {
+    const prUrl = result?.kind === "result" && result.text ? result.text.trim() : "";
+    if (!prUrl.startsWith("http")) return null;
+    try {
+      const stat = await runCommand(sbx, `cd ${REPO_DIR} && git diff origin/HEAD... --shortstat`);
+      if (stat.exitCode !== 0 || !diffExceedsThreshold(stat.stdout)) return null;
+      await acts.thought("Big diff — running a self-review before handing off…");
+      const r = await this.#trackedRun(ctx.agentSessionId, "review", sbx, reviewTask(ctx, prUrl, plan, null, map), acts);
+      return r?.kind === "result" && r.text ? r.text : null;
+    } catch (err) {
+      console.error(`[review] ${ctx.agentSessionId} self-review failed (advisory, continuing): ${err instanceof Error ? err.message : String(err)}`);
+      return null;
     }
   }
 

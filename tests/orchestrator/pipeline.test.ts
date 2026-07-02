@@ -352,3 +352,42 @@ describe("diffExceedsThreshold", () => {
     expect(diffExceedsThreshold("fatal: bad revision")).toBe(false);
   });
 });
+
+// A fake Reconnected sandbox whose RESULT_FILE already holds `resultJson`.
+// watchDetached reads the file first, so commands.list is never load-bearing.
+function fakeReconnected(resultJson: string) {
+  return {
+    files: {
+      read: async () => resultJson,
+      write: async () => undefined,
+    },
+    commands: {
+      run: async () => ({ exitCode: 0 }),
+      list: async () => [],
+    },
+    kill: async () => undefined,
+  };
+}
+
+describe("finishImplement persists pr_url (via reconcile)", () => {
+  it("stores the PR URL and moves to done", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_pr1", "implement", "iss");
+    store.setSandbox("as_pr1", "sbx_1");
+    const log: string[] = [];
+    const result = JSON.stringify({
+      kind: "result", subtype: "success",
+      text: "https://github.com/o/r/pull/42", costUsd: null, sessionId: null,
+    });
+    const orch = new Orchestrator(
+      { targetRepo: "o/r" } as Config, store, () => fakeActs(log),
+      undefined, async () => fakeReconnected(result),
+    );
+    await orch.reconcile();
+    const row = store.get("as_pr1");
+    expect(row?.phase).toBe("done");
+    expect(row?.prUrl).toBe("https://github.com/o/r/pull/42");
+    expect(log.some((l) => l.startsWith("response:"))).toBe(true);
+    store.close();
+  });
+});
