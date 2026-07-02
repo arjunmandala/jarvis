@@ -14,7 +14,6 @@ describe("planTask", () => {
     expect(t.allowedTools).toEqual(expect.arrayContaining(["Read", "Glob", "Grep", "Skill"]));
     expect(t.allowedTools).not.toContain("Write");
     expect(t.allowedTools).not.toContain("Edit");
-    expect(t.allowedTools).not.toContain("Bash");
     expect(t.goal).toContain("Add /health");
     expect(t.cwd).toBe("/home/user/repo");
   });
@@ -142,5 +141,43 @@ describe("conversational directives", () => {
       expect(t.systemAppend).toMatch(/ask_user/);
       expect(t.systemAppend).toMatch(/steer/i);
     }
+  });
+});
+
+const ctxA: IssueContext = {
+  agentSessionId: "a", organizationId: "o", issueId: "i",
+  title: "Title A", description: "Desc A", comment: "", promptContext: "",
+};
+const ctxB: IssueContext = { ...ctxA, title: "Different title", description: "Different desc" };
+
+describe("type-aware prompts", () => {
+  it("plan append demands the Type: contract line", () => {
+    expect(planTask(ctxA).systemAppend).toContain("Type:");
+    expect(planTask(ctxA).systemAppend).toMatch(/bug/);
+    expect(planTask(ctxA).systemAppend).toMatch(/refactor/);
+  });
+
+  it("appends are byte-stable across different issues (prompt-cache invariant)", () => {
+    expect(planTask(ctxA).systemAppend).toBe(planTask(ctxB).systemAppend);
+    expect(implementTask(ctxA, "plan").systemAppend).toBe(implementTask(ctxB, "other plan").systemAppend);
+    expect(planTask(ctxA).systemAppend).not.toContain("Title A");
+  });
+});
+
+describe("tool allowlists", () => {
+  it("plan and revise get Bash + web + serena", () => {
+    for (const t of [planTask(ctxA), reviseTask(ctxA, "p", "f")]) {
+      expect(t.allowedTools).toContain("Bash");
+      expect(t.allowedTools).toContain("WebSearch");
+      expect(t.allowedTools).toContain("WebFetch");
+      expect(t.allowedTools).toContain("mcp__serena");
+    }
+  });
+
+  it("implement gets web + serena", () => {
+    const t = implementTask(ctxA, "p");
+    expect(t.allowedTools).toContain("WebSearch");
+    expect(t.allowedTools).toContain("WebFetch");
+    expect(t.allowedTools).toContain("mcp__serena");
   });
 });
