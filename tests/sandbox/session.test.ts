@@ -175,8 +175,14 @@ describe("runAgent supervision", () => {
 
   it("(b) stream never settles, process list empty, file present -> file result", async () => {
     const f = makeFake({ files: {}, processes: [] });
-    f.setFile(RESULT_FILE, JSON.stringify(RESULT_EVENT));
-    // file present -> watcher returns on first read, before any sleep
+    // Simulate the runner writing its result as soon as it's launched (i.e.
+    // after runAgent's own RESULT_FILE-clearing write), so the watcher's
+    // first read (no sleep needed) picks it up.
+    const origRun = f.sbx.commands.run.bind(f.sbx.commands);
+    f.sbx.commands.run = async (cmd: string, o: { onStdout?: (d: string) => void }) => {
+      f.setFile(RESULT_FILE, JSON.stringify(RESULT_EVENT));
+      return origRun(cmd, o);
+    };
     const out = await runAgent(f.sbx as never, "key", TASK, () => {});
     expect(out.result).toEqual(RESULT_EVENT);
     expect(out.exitCode).toBe(-1); // stream never finished
@@ -199,10 +205,38 @@ describe("runAgent supervision", () => {
     }
   });
 
+  it("clears a stale RESULT_FILE from a prior run before launching the runner (shared-sandbox reuse)", async () => {
+    const STALE_EVENT: JarvisEvent = {
+      kind: "result",
+      subtype: "success",
+      text: "stale-from-prior-run",
+      costUsd: 0.01,
+      sessionId: "prior",
+    };
+    const f = makeFake({ files: { [RESULT_FILE]: JSON.stringify(STALE_EVENT) } });
+    let resultFileAtRunTime: string | undefined;
+    const origRun = f.sbx.commands.run.bind(f.sbx.commands);
+    f.sbx.commands.run = async (cmd: string, o: { onStdout?: (d: string) => void }) => {
+      resultFileAtRunTime = await f.sbx.files.read(RESULT_FILE).catch(() => undefined);
+      return origRun(cmd, o);
+    };
+
+    const p = runAgent(f.sbx as never, "key", TASK, () => {});
+    await tick();
+    f.emit(JSON.stringify(RESULT_EVENT) + "\n");
+    f.resolveRun({ exitCode: 0 });
+    const out = await p;
+
+    expect(resultFileAtRunTime).toBe(""); // cleared before the runner was launched
+    expect(out.result).toEqual(RESULT_EVENT); // not the stale prior-run result
+  });
+
   it("stream settles with exit but file has result -> file result used", async () => {
     const f = makeFake({ files: {} });
-    f.setFile(RESULT_FILE, JSON.stringify(RESULT_EVENT));
     const p = runAgent(f.sbx as never, "key", TASK, () => {});
+    await tick(); // let runAgent clear RESULT_FILE and register onStdout
+    // simulate the runner writing its result to the file during the run
+    f.setFile(RESULT_FILE, JSON.stringify(RESULT_EVENT));
     // stream finishes with a nonzero exit and no result event on stdout
     f.resolveRun({ exitCode: 3 });
     const out = await p;

@@ -32,6 +32,31 @@ export class SessionStore {
     if (!cols.some((c) => c.name === "sandbox_id")) {
       this.#db.exec(`ALTER TABLE sessions ADD COLUMN sandbox_id TEXT`);
     }
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS repo_maps (
+        repo       TEXT PRIMARY KEY,
+        map        TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT
+    `);
+  }
+
+  getRepoMap(repo: string): string | undefined {
+    const row = this.#db.prepare(`SELECT map FROM repo_maps WHERE repo = ?`).get(repo) as
+      | { map: string }
+      | undefined;
+    return row?.map;
+  }
+
+  setRepoMap(repo: string, map: string): void {
+    this.#db
+      .prepare(
+        `INSERT INTO repo_maps (repo, map, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(repo)
+         DO UPDATE SET map = excluded.map, updated_at = excluded.updated_at`,
+      )
+      .run(repo, map, new Date().toISOString());
   }
 
   upsert(agentSessionId: string, phase: Phase, issueId: string | null = null): void {

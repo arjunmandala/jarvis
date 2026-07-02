@@ -5,7 +5,7 @@ import type { IssueContext } from "../linear/context.ts";
 import { APPROVAL_FOOTER } from "../linear/context.ts";
 import { withSandbox, cloneRepo, runAgent, watchDetached, type AgentSandbox } from "../sandbox/session.ts";
 import { Sandbox } from "e2b";
-import { planTask, implementTask } from "../agent/tasks.ts";
+import { planTask, implementTask, mapTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
 
 // Phase 4.1: surface the run's dollar cost inline in the Linear activity when
@@ -133,7 +133,24 @@ export class Orchestrator {
     const { result } = await withSandbox(this.#sbxCfg(), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       await cloneRepo(sbx, this.#sbxCfg());
-      return runAgent(sbx, this.#config.anthropicApiKey, planTask(ctx), this.#relay(acts));
+
+      let map = this.#store.getRepoMap(this.#config.targetRepo);
+      if (!map) {
+        await acts.thought("First time in this repo — mapping it for faster future runs…");
+        try {
+          const { result: mapResult } = await runAgent(sbx, this.#config.anthropicApiKey, mapTask(), this.#relay(acts));
+          this.#logUsage(`map ${ctx.agentSessionId}`, mapResult);
+          if (mapResult?.kind === "result" && mapResult.text && mapResult.text.trim()) {
+            map = mapResult.text;
+            this.#store.setRepoMap(this.#config.targetRepo, map);
+          }
+        } catch (err) {
+          // Mapping is an optimization only — any failure must never fail the session.
+          console.error(`[map] ${ctx.agentSessionId} repo map generation failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      return runAgent(sbx, this.#config.anthropicApiKey, planTask(ctx, map), this.#relay(acts));
     });
 
     await this.#finishPlan(ctx.agentSessionId, acts, result);
@@ -147,8 +164,7 @@ export class Orchestrator {
     const plan = result?.kind === "result" && result.text ? result.text : null;
     console.log(`[phase] ${agentSessionId} plan run finished (plan=${plan ? plan.length + " chars" : "NONE"})`);
     if (!plan) {
-      await acts.error("I couldn't produce a plan. Please add detail to the issue and re-assign me.");
-      this.#store.setPhase(agentSessionId, "error");
+      await this.#failLoud(agentSessionId, acts, "I couldn't produce a plan. Please add detail to the issue and re-assign me.");
       return;
     }
     this.#store.setPlan(agentSessionId, plan);
@@ -179,8 +195,13 @@ export class Orchestrator {
     const approved = parseApprovalGate(replyText);
     if (!approved && parseStopGate(replyText)) {
       console.log(`[phase] ${ctx.agentSessionId} stop requested — closing session`);
-      await acts.response("Stopped. Re-assign the issue when you want me to plan again.");
-      this.#store.setPhase(ctx.agentSessionId, "done");
+      try {
+        await acts.response("Stopped. Re-assign the issue when you want me to plan again.");
+      } catch (err) {
+        console.error(`[phase] ${ctx.agentSessionId} failed to post stop activity: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        this.#store.setPhase(ctx.agentSessionId, "done");
+      }
       return;
     }
     if (!approved) {
@@ -195,20 +216,21 @@ export class Orchestrator {
     }
     if (!plan || !plan.trim()) {
       console.error(`[phase] ${ctx.agentSessionId} approved but plan is missing — refusing to implement blind`);
-      await acts.error(
+      await this.#failLoud(
+        ctx.agentSessionId, acts,
         "I lost the plan for this session (likely a restart before it was saved). Re-assign the issue and I'll plan again.",
       );
-      this.#store.setPhase(ctx.agentSessionId, "error");
       return;
     }
     this.#store.setPhase(ctx.agentSessionId, "implement");
     console.log(`[phase] ${ctx.agentSessionId} → implement (approved)`);
     await acts.thought("Approved — implementing in a sandbox now.");
 
+    const map = this.#store.getRepoMap(this.#config.targetRepo);
     const { result } = await withSandbox(this.#sbxCfg(), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       await cloneRepo(sbx, this.#sbxCfg());
-      return runAgent(sbx, this.#config.anthropicApiKey, implementTask(ctx, plan), this.#relay(acts));
+      return runAgent(sbx, this.#config.anthropicApiKey, implementTask(ctx, plan, map), this.#relay(acts));
     });
 
     await this.#finishImplement(ctx.agentSessionId, acts, result);
@@ -218,14 +240,35 @@ export class Orchestrator {
   // (error). Called from onPrompted and, after a restart, from reconcile.
   async #finishImplement(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
     this.#logUsage(`implement ${agentSessionId}`, result);
-    if (result?.kind === "result" && result.text) {
+    const text = result?.kind === "result" && result.text ? result.text.trim() : "";
+    if (text.startsWith("PR_FAILED:")) {
+      console.error(`[phase] ${agentSessionId} → error (PR creation failed: ${text.slice(0, 100)})`);
+      await this.#failLoud(agentSessionId, acts, `PR could not be opened: ${text.slice("PR_FAILED:".length).trim()}`);
+    } else if (result?.kind === "result" && result.text) {
       console.log(`[phase] ${agentSessionId} → done (PR: ${result.text.slice(0, 100)})`);
-      await acts.response(`Done. PR opened:\n\n${result.text}\n\n_A human review + merge closes this out._${costLine(result)}`);
-      this.#store.setPhase(agentSessionId, "done");
+      try {
+        await acts.response(`Done. PR opened:\n\n${result.text}\n\n_A human review + merge closes this out._${costLine(result)}`);
+      } catch (err) {
+        console.error(`[phase] ${agentSessionId} failed to post done activity: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        this.#store.setPhase(agentSessionId, "done");
+      }
     } else {
       console.error(`[phase] ${agentSessionId} → error (implement did not complete)`);
-      await acts.error(result?.kind === "error" ? result.message : "Implementation did not complete.");
-      this.#store.setPhase(agentSessionId, "error");
+      await this.#failLoud(agentSessionId, acts, result?.kind === "error" ? result.message : "Implementation did not complete.");
+    }
+  }
+
+  // Marks a session failed locally even if the Linear post itself fails (e.g.
+  // "Entity not found: AgentSession" for a session Linear no longer knows about) —
+  // otherwise the row stays in plan/implement and reconcile retries it forever.
+  async #failLoud(id: string, acts: Activities, message: string): Promise<void> {
+    try {
+      await acts.error(message);
+    } catch (err) {
+      console.error(`[reconcile] ${id} failed to post error activity: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      this.#store.setPhase(id, "error");
     }
   }
 
@@ -246,10 +289,10 @@ export class Orchestrator {
         try {
           if (!row.sandboxId) {
             console.log(`[reconcile] ${id} phase=${row.phase} has no sandboxId — failing loud`);
-            await acts.error(
+            await this.#failLoud(
+              id, acts,
               "A restart interrupted this run before its sandbox was recorded — re-assign the issue to retry.",
             );
-            this.#store.setPhase(id, "error");
             return;
           }
           console.log(`[reconcile] ${id} phase=${row.phase} re-attaching to sandbox ${row.sandboxId}`);
@@ -258,16 +301,14 @@ export class Orchestrator {
             sbx = await this.#connect(row.sandboxId);
           } catch (err) {
             console.error(`[reconcile] ${id} connect failed: ${err instanceof Error ? err.message : String(err)}`);
-            await acts.error("A restart interrupted this run — re-assign the issue to retry.");
-            this.#store.setPhase(id, "error");
+            await this.#failLoud(id, acts, "A restart interrupted this run — re-assign the issue to retry.");
             return;
           }
           try {
             const result = await watchDetached(sbx);
             if (!result) {
               console.log(`[reconcile] ${id} no result recovered from sandbox — failing loud`);
-              await acts.error("A restart interrupted this run — re-assign the issue to retry.");
-              this.#store.setPhase(id, "error");
+              await this.#failLoud(id, acts, "A restart interrupted this run — re-assign the issue to retry.");
               return;
             }
             console.log(`[reconcile] ${id} recovered result (${result.kind}) — finishing phase=${row.phase}`);

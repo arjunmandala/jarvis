@@ -67,6 +67,29 @@ describe("SessionStore", () => {
     s.close();
   });
 
+  describe("repo maps", () => {
+    it("returns undefined when no map is stored for the repo", () => {
+      const s = new SessionStore(":memory:");
+      expect(s.getRepoMap("owner/repo")).toBeUndefined();
+      s.close();
+    });
+
+    it("set then get roundtrips the map", () => {
+      const s = new SessionStore(":memory:");
+      s.setRepoMap("owner/repo", "# Map\n\n- src/foo.ts: does foo");
+      expect(s.getRepoMap("owner/repo")).toBe("# Map\n\n- src/foo.ts: does foo");
+      s.close();
+    });
+
+    it("upsert overwrites an existing map for the same repo", () => {
+      const s = new SessionStore(":memory:");
+      s.setRepoMap("owner/repo", "first map");
+      s.setRepoMap("owner/repo", "second map");
+      expect(s.getRepoMap("owner/repo")).toBe("second map");
+      s.close();
+    });
+  });
+
   describe("migration", () => {
     let dir: string;
     afterEach(() => {
