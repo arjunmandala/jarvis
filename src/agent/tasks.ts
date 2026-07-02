@@ -25,8 +25,8 @@ const IMPLEMENT_APPEND =
   "before choosing your process.\n\n" +
   "SMALL CHANGE (roughly: 2 or fewer files, no design ambiguity, plan is a few bullets): implement it " +
   "directly with a focused test proving the change. Do NOT dispatch subagents, do NOT re-plan or " +
-  "brainstorm, do NOT run requesting-code-review, and do NOT start the app — a passing focused test plus " +
-  "the repo's test suite is sufficient proof.\n\n" +
+  "brainstorm, do NOT run requesting-code-review, and do NOT start the app unless the VERIFICATION rule " +
+  "below requires it — a passing focused test plus the repo's test suite is sufficient proof.\n\n" +
   "LARGER WORK: use subagent-driven-development and test-driven-development while coding, and " +
   "systematic-debugging on any failure. Then use requesting-code-review on the diff and fix what it finds " +
   "before opening the PR.\n\n" +
