@@ -144,6 +144,11 @@ export function implementTask(ctx: IssueContext, approvedPlan: string, repoMap?:
   };
 }
 
+// ponytail: "read-only" is prompt-level — the sandbox still holds GH_TOKEN (env +
+// origin URL), so a hijacked review run could push. The sandbox is the isolation
+// boundary, consistent with implement. Ceiling: strip the token from the fresh
+// on-demand sandbox (remote set-url + drop GH_TOKEN from the run env) if review
+// runs ever process untrusted web content at scale.
 const REVIEW_APPEND =
   "You are Jarvis reviewing a diff produced for this Linear ticket. You are a REVIEWER: report " +
   "findings; never modify files, never push, never comment on GitHub.\n\n" +

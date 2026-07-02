@@ -63,21 +63,21 @@ export async function cloneRepo(sbx: Sandbox, cfg: SandboxConfig): Promise<void>
       throw new Error(redactSecret(`git clone failed (${res.exitCode}): ${res.stderr}`, cfg.ghToken));
     }
   });
-  await indexRepo(sbx);
+  await indexRepo(sbx, cfg.ghToken);
 }
 
 // Serena index: pays the LSP indexing cost once up front instead of on the
 // agent's first symbolic query. ponytail: advisory — any failure (serena not
 // in the template yet, unsupported language, LSP crash) logs and continues;
 // the agent falls back to Grep/Glob.
-export async function indexRepo(sbx: Sandbox): Promise<void> {
+export async function indexRepo(sbx: Sandbox, ghToken = ""): Promise<void> {
   try {
     const res = await runCommand(sbx, `serena project index ${REPO_DIR}`);
     if (res.exitCode !== 0) {
-      console.error(`[serena] project index failed (${res.exitCode}): ${res.stderr.slice(0, 300)}`);
+      console.error(redactSecret(`[serena] project index failed (${res.exitCode}): ${res.stderr.slice(0, 300)}`, ghToken));
     }
   } catch (err) {
-    console.error(`[serena] project index errored: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(redactSecret(`[serena] project index errored: ${err instanceof Error ? err.message : String(err)}`, ghToken));
   }
 }
 

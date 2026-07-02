@@ -390,6 +390,32 @@ describe("finishImplement persists pr_url (via reconcile)", () => {
     expect(log.some((l) => l.startsWith("response:"))).toBe(true);
     store.close();
   });
+
+  // A restart during self-review: the review run overwrote RESULT_FILE with a
+  // markdown report. Reconcile must NOT store it as pr_url or announce it as
+  // the PR — it fails loud instead.
+  it("a multi-line markdown report in RESULT_FILE does not become pr_url", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_pr2", "implement", "iss");
+    store.setSandbox("as_pr2", "sbx_2");
+    const log: string[] = [];
+    const report = "## Review\n\n1. `src/x.ts:12` — off-by-one\n\n_Report only — no changes were made._";
+    const result = JSON.stringify({
+      kind: "result", subtype: "success",
+      text: report, costUsd: null, sessionId: null,
+    });
+    const orch = new Orchestrator(
+      { targetRepo: "o/r" } as Config, store, () => fakeActs(log),
+      undefined, async () => fakeReconnected(result),
+    );
+    await orch.reconcile();
+    const row = store.get("as_pr2");
+    expect(row?.phase).toBe("error");
+    expect(row?.prUrl).toBeFalsy();
+    expect(log.some((l) => l.startsWith("response:"))).toBe(false); // no "Done. PR opened"
+    expect(log.some((l) => l.startsWith("error:"))).toBe(true);
+    store.close();
+  });
 });
 
 describe("on-demand review on done sessions", () => {

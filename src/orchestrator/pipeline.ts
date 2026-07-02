@@ -16,6 +16,11 @@ export function costLine(result: JarvisEvent | null): string {
   return `\n\n_Cost: $${result.costUsd.toFixed(4)}_`;
 }
 
+// A PR URL is a single-line http(s) URL. Anything else — notably a markdown
+// review report that a self-review run wrote over RESULT_FILE — must never be
+// stored as pr_url or announced as the PR.
+export const PR_URL_RE = /^https?:\/\/\S+$/;
+
 // Self-review trigger: a diff bigger than either bound gets an automatic
 // review pass before the PR is announced. Deterministic, no model call.
 export const REVIEW_MAX_FILES = 5;
@@ -346,6 +351,12 @@ export class Orchestrator {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       await cloneRepo(sbx, this.#sbxCfg());
       const r = await this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map), acts);
+      // Persist the PR URL BEFORE self-review: the review run deletes and
+      // rewrites RESULT_FILE, so a restart (or stop) during self-review would
+      // otherwise lose the PR — or worse, reconcile would recover the review
+      // report and feed it to #finishImplement as if it were the PR URL.
+      const prText = r?.kind === "result" && r.text ? r.text.trim() : "";
+      if (PR_URL_RE.test(prText)) this.#store.setPrUrl(ctx.agentSessionId, prText);
       review = await this.#maybeSelfReview(ctx, sbx, r, plan, map, acts);
       return r;
     });
@@ -396,7 +407,7 @@ export class Orchestrator {
     if (text.startsWith("PR_FAILED:")) {
       console.error(`[phase] ${agentSessionId} → error (PR creation failed: ${text.slice(0, 100)})`);
       await this.#failLoud(agentSessionId, acts, `PR could not be opened: ${text.slice("PR_FAILED:".length).trim()}`);
-    } else if (result?.kind === "result" && result.text) {
+    } else if (result?.kind === "result" && result.text && PR_URL_RE.test(text)) {
       console.log(`[phase] ${agentSessionId} → done (PR: ${result.text.slice(0, 100)})`);
       this.#store.setPrUrl(agentSessionId, text);
       if (review) this.#store.setReview(agentSessionId, review);
@@ -408,6 +419,11 @@ export class Orchestrator {
       } finally {
         this.#store.setPhase(agentSessionId, "done");
       }
+    } else if (result?.kind === "result" && result.text) {
+      // A result that isn't a single-line URL (e.g. a self-review report that
+      // overwrote RESULT_FILE and got recovered by reconcile) is NOT a PR.
+      console.error(`[phase] ${agentSessionId} → error (implement finished without a PR URL: ${text.slice(0, 100).replace(/\n/g, " ")})`);
+      await this.#failLoud(agentSessionId, acts, "Implement finished without a PR URL. Re-assign the issue to retry, or check GitHub — the PR may already exist.");
     } else {
       console.error(`[phase] ${agentSessionId} → error (implement did not complete)`);
       await this.#failLoud(agentSessionId, acts, result?.kind === "error" ? result.message : "Implementation did not complete.");
@@ -420,12 +436,15 @@ export class Orchestrator {
   // question gets answered in the diff's context).
   async #onDoneFollowUp(ctx: IssueContext, row: SessionRow, replyText: string, acts: Activities): Promise<void> {
     if (parseStopGate(replyText)) {
+      console.log(`[phase] ${ctx.agentSessionId} done follow-up: stop — staying done`);
       await acts.response("Understood — closing this out. The PR is waiting on human review.");
       return;
     }
     console.log(`[phase] ${ctx.agentSessionId} done → review (follow-up on ${row.prUrl})`);
     this.#store.setPhase(ctx.agentSessionId, "review");
-    await acts.thought("Looking at the PR diff…");
+    // Fire-and-forget: thought is one-shot telemetry, and a rejection here
+    // (outside the try/catch) would wedge the session in `review`.
+    void acts.thought("Looking at the PR diff…").catch(() => {});
     const map = this.#store.getRepoMap(this.#config.targetRepo);
     let result: JarvisEvent | null = null;
     try {
@@ -443,6 +462,10 @@ export class Orchestrator {
   // Review always returns the session to done — a failed review is retryable
   // by replying again, never a wedged `error` session.
   async #finishReview(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
+    // A mid-run "stop" (steer) already set the session to done and killed the
+    // sandbox — don't post a contradictory error when the killed run's null
+    // result lands here. (Early return, so the finally's setPhase never runs.)
+    if (this.#store.get(agentSessionId)?.phase === "done") return;
     const report = result?.kind === "result" && result.text ? result.text : null;
     try {
       if (report) {
@@ -503,8 +526,9 @@ export class Orchestrator {
   // For every row still in a run phase (plan/implement), either recover it by
   // re-attaching to its sandbox, or fail it loud so the human can re-assign.
   // Race note: a `prompted` webhook arriving while a session is being reconciled
-  // cannot double-run it — onPrompted only acts in phase await_approval, and
-  // reconciled rows are in plan/implement until #finish* moves them.
+  // cannot double-run it — onPrompted only acts in phase await_approval (plus
+  // done-with-PR follow-ups, which require phase=done), and reconciled rows stay
+  // in plan/implement/review until #finish* moves them.
   async reconcile(): Promise<void> {
     const rows = this.#store.listByPhase("plan", "implement", "review");
     if (rows.length === 0) return;
