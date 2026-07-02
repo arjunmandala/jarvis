@@ -49,9 +49,16 @@ function issueBlock(ctx: IssueContext): string {
   );
 }
 
-export function planTask(ctx: IssueContext): AgentTask {
+// Per-run content only — never fold into systemAppend, which must stay
+// byte-stable across runs for prompt caching.
+function repoMapBlock(repoMap?: string): string {
+  if (!repoMap) return "";
+  return `\n\n---\nRepository map (pre-generated; trust it for orientation, verify before depending on details):\n${repoMap}`;
+}
+
+export function planTask(ctx: IssueContext, repoMap?: string): AgentTask {
   return {
-    goal: `Produce an implementation plan for this issue.\n\n${issueBlock(ctx)}`,
+    goal: `Produce an implementation plan for this issue.\n\n${issueBlock(ctx)}${repoMapBlock(repoMap)}`,
     cwd: REPO_DIR,
     model: "claude-sonnet-5",
     systemAppend: PLAN_APPEND,
@@ -61,7 +68,7 @@ export function planTask(ctx: IssueContext): AgentTask {
   };
 }
 
-export function implementTask(ctx: IssueContext, approvedPlan: string): AgentTask {
+export function implementTask(ctx: IssueContext, approvedPlan: string, repoMap?: string): AgentTask {
   return {
     goal:
       `Implement the following APPROVED plan, push with \`git push origin <branch>\` (origin's URL already ` +
@@ -69,12 +76,31 @@ export function implementTask(ctx: IssueContext, approvedPlan: string): AgentTas
       `After the PR is created, run \`gh pr view --json url -q .url\` and make your FINAL message EXACTLY ` +
       `that URL alone — no prose, no markdown. If PR creation fails, your FINAL message must instead start ` +
       `with \`PR_FAILED:\` followed by the reason.\n\n` +
-      `${approvedPlan}\n\n---\nOriginal issue:\n${issueBlock(ctx)}`,
+      `${approvedPlan}\n\n---\nOriginal issue:\n${issueBlock(ctx)}${repoMapBlock(repoMap)}`,
     cwd: REPO_DIR,
     model: "claude-opus-4-8", // hard task
     systemAppend: IMPLEMENT_APPEND,
     allowedTools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "Skill", "Agent"],
     maxTurns: 200,
     maxBudgetUsd: 8,
+  };
+}
+
+const MAP_APPEND =
+  "You are mapping a repository for future agent runs. Be concise and factual; prefer file paths over prose.";
+
+export function mapTask(): AgentTask {
+  return {
+    goal:
+      `Produce a concise architecture map of the repository at ${REPO_DIR} in Markdown, ≤120 lines: ` +
+      `what the project is, directory layout, key modules and their responsibilities, how to build/test/lint/run, ` +
+      `and notable conventions. Your FINAL message must be exactly the map — no preamble, no closing remarks — ` +
+      `it is stored and injected into future agent runs. Do not write any files.`,
+    cwd: REPO_DIR,
+    model: "claude-sonnet-5",
+    systemAppend: MAP_APPEND,
+    allowedTools: ["Read", "Glob", "Grep"],
+    maxTurns: 30,
+    maxBudgetUsd: 1,
   };
 }

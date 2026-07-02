@@ -5,7 +5,7 @@ import type { IssueContext } from "../linear/context.ts";
 import { APPROVAL_FOOTER } from "../linear/context.ts";
 import { withSandbox, cloneRepo, runAgent, watchDetached, type AgentSandbox } from "../sandbox/session.ts";
 import { Sandbox } from "e2b";
-import { planTask, implementTask } from "../agent/tasks.ts";
+import { planTask, implementTask, mapTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
 
 // Phase 4.1: surface the run's dollar cost inline in the Linear activity when
@@ -133,7 +133,24 @@ export class Orchestrator {
     const { result } = await withSandbox(this.#sbxCfg(), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       await cloneRepo(sbx, this.#sbxCfg());
-      return runAgent(sbx, this.#config.anthropicApiKey, planTask(ctx), this.#relay(acts));
+
+      let map = this.#store.getRepoMap(this.#config.targetRepo);
+      if (!map) {
+        await acts.thought("First time in this repo — mapping it for faster future runs…");
+        try {
+          const { result: mapResult } = await runAgent(sbx, this.#config.anthropicApiKey, mapTask(), this.#relay(acts));
+          this.#logUsage(`map ${ctx.agentSessionId}`, mapResult);
+          if (mapResult?.kind === "result" && mapResult.text && mapResult.text.trim()) {
+            map = mapResult.text;
+            this.#store.setRepoMap(this.#config.targetRepo, map);
+          }
+        } catch (err) {
+          // Mapping is an optimization only — any failure must never fail the session.
+          console.error(`[map] ${ctx.agentSessionId} repo map generation failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      return runAgent(sbx, this.#config.anthropicApiKey, planTask(ctx, map), this.#relay(acts));
     });
 
     await this.#finishPlan(ctx.agentSessionId, acts, result);
@@ -209,10 +226,11 @@ export class Orchestrator {
     console.log(`[phase] ${ctx.agentSessionId} → implement (approved)`);
     await acts.thought("Approved — implementing in a sandbox now.");
 
+    const map = this.#store.getRepoMap(this.#config.targetRepo);
     const { result } = await withSandbox(this.#sbxCfg(), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       await cloneRepo(sbx, this.#sbxCfg());
-      return runAgent(sbx, this.#config.anthropicApiKey, implementTask(ctx, plan), this.#relay(acts));
+      return runAgent(sbx, this.#config.anthropicApiKey, implementTask(ctx, plan, map), this.#relay(acts));
     });
 
     await this.#finishImplement(ctx.agentSessionId, acts, result);
