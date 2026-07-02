@@ -23,7 +23,10 @@ const IMPLEMENT_APPEND =
   "VERIFY before claiming success (verification-before-completion): run the repo's tests and lint, " +
   "start the app and curl the new behaviour to prove it works; loop until everything is green. " +
   "Then use requesting-code-review on the diff and fix what it finds. " +
-  "Finally create a branch, commit, push, and open a PR with `gh pr create --fill`. " +
+  "Finally create a branch, commit, and `git push origin <branch>` — origin's URL already has a working " +
+  "credential embedded, so push directly and do not run `gh auth login` or `gh auth setup-git` " +
+  "(that rewires git's credential helper and can break the push). Then open a PR with `gh pr create --fill` " +
+  "(gh already reads GH_TOKEN from the environment; no separate gh auth step is needed). " +
   "Your FINAL message must be the PR URL.";
 
 function issueBlock(ctx: IssueContext): string {
@@ -49,7 +52,8 @@ export function planTask(ctx: IssueContext): AgentTask {
 export function implementTask(ctx: IssueContext, approvedPlan: string): AgentTask {
   return {
     goal:
-      `Implement the following APPROVED plan, then open a PR with \`gh pr create --fill\`.\n\n` +
+      `Implement the following APPROVED plan, push with \`git push origin <branch>\` (origin's URL already ` +
+      `has your credential — no gh auth needed for the push), then open a PR with \`gh pr create --fill\`.\n\n` +
       `${approvedPlan}\n\n---\nOriginal issue:\n${issueBlock(ctx)}`,
     cwd: REPO_DIR,
     model: "claude-opus-4-8", // hard task
