@@ -1,3 +1,6 @@
+export const APPROVAL_FOOTER =
+  '\n\n---\n**Reply "approve" to have me implement this**, or tell me what to change.';
+
 export interface IssueContext {
   agentSessionId: string;
   organizationId: string;

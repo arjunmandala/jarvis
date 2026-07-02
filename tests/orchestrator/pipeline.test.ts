@@ -131,3 +131,45 @@ describe("onPrompted never goes silent", () => {
     store.close();
   });
 });
+
+describe("onPrompted plan recovery from Linear", () => {
+  it("still errors (no sandbox call) when the plan is missing and fetchPlan returns null", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_r1", "await_approval", "iss");
+    const log: string[] = [];
+    const fetchPlan = async () => null;
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log), fetchPlan);
+    await orch.onPrompted(ctxFor("as_r1"), "approve");
+    expect(log.some((l) => l.startsWith("error:"))).toBe(true);
+    expect(store.get("as_r1")?.phase).toBe("error");
+    expect(store.get("as_r1")?.plan).toBeFalsy();
+    store.close();
+  });
+
+  it("still errors (no sandbox call) when the plan is missing and fetchPlan is not provided", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_r2", "await_approval", "iss");
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
+    await orch.onPrompted(ctxFor("as_r2"), "approve");
+    expect(log.some((l) => l.startsWith("error:"))).toBe(true);
+    expect(store.get("as_r2")?.phase).toBe("error");
+    store.close();
+  });
+
+  it("persists the recovered plan via store.setPlan before attempting the sandbox run", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_r3", "await_approval", "iss");
+    const log: string[] = [];
+    const fetchPlan = async () => "recovered plan text";
+    // No real e2b credentials -> withSandbox/Sandbox.create will reject; the
+    // orchestrator's onPrompted does not catch that, so the promise rejects,
+    // but the persistence happens (via fetchPlan await + store.setPlan) before
+    // the sandbox call, so we can assert on the store regardless of the outcome.
+    const orch = new Orchestrator({ e2bApiKey: "", e2bTemplate: "", ghToken: "", targetRepo: "" } as Config, store, () => fakeActs(log), fetchPlan);
+    await orch.onPrompted(ctxFor("as_r3"), "approve").catch(() => undefined);
+    expect(store.get("as_r3")?.plan).toBe("recovered plan text");
+    expect(log.some((l) => l.startsWith("[recover]"))).toBe(false); // recover is console.log, not an activity
+    store.close();
+  });
+});

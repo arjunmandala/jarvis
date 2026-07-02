@@ -2,9 +2,17 @@ import type { Config } from "../config.ts";
 import type { SessionStore, Phase } from "../store/sessions.ts";
 import type { Activities } from "../linear/activities.ts";
 import type { IssueContext } from "../linear/context.ts";
+import { APPROVAL_FOOTER } from "../linear/context.ts";
 import { withSandbox, cloneRepo, runAgent } from "../sandbox/session.ts";
 import { planTask, implementTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
+
+// Phase 4.1: surface the run's dollar cost inline in the Linear activity when
+// the result carries one; omitted (not "$n/a") when unknown.
+export function costLine(result: JarvisEvent | null): string {
+  if (result?.kind !== "result" || result.costUsd == null) return "";
+  return `\n\n_Cost: $${result.costUsd.toFixed(4)}_`;
+}
 
 export function nextPhase(current: Phase, approved: boolean): Phase {
   switch (current) {
@@ -33,15 +41,18 @@ export class Orchestrator {
   #config: Config;
   #store: SessionStore;
   #makeActs: (agentSessionId: string) => Activities;
+  #fetchPlan?: (agentSessionId: string) => Promise<string | null>;
 
   constructor(
     config: Config,
     store: SessionStore,
     makeActs: (agentSessionId: string) => Activities,
+    fetchPlan?: (agentSessionId: string) => Promise<string | null>,
   ) {
     this.#config = config;
     this.#store = store;
     this.#makeActs = makeActs;
+    this.#fetchPlan = fetchPlan;
   }
 
   #sbxCfg() {
@@ -93,6 +104,7 @@ export class Orchestrator {
     await acts.thought("Reading the codebase to draft a plan…");
 
     const { result } = await withSandbox(this.#sbxCfg(), async (sbx) => {
+      this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       await cloneRepo(sbx, this.#sbxCfg());
       return runAgent(sbx, this.#config.anthropicApiKey, planTask(ctx), this.#relay(acts));
     });
@@ -107,7 +119,7 @@ export class Orchestrator {
     }
     this.#store.setPlan(ctx.agentSessionId, plan);
     this.#store.setPhase(ctx.agentSessionId, "await_approval");
-    await acts.elicitation(`${plan}\n\n---\n**Reply "approve" to have me implement this**, or tell me what to change.`);
+    await acts.elicitation(`${plan}${APPROVAL_FOOTER}${costLine(result)}`);
   }
 
   // prompted: a reply arrived while awaiting approval.
@@ -143,7 +155,15 @@ export class Orchestrator {
       await acts.elicitation("Understood — not implementing yet. Reply 'approve' when ready, or 'stop' to cancel.");
       return;
     }
-    const plan = row.plan;
+    let plan = row.plan;
+    if ((!plan || !plan.trim()) && this.#fetchPlan) {
+      const recovered = await this.#fetchPlan(ctx.agentSessionId);
+      if (recovered && recovered.trim()) {
+        console.log(`[recover] ${ctx.agentSessionId} recovered plan from Linear (${recovered.length} chars)`);
+        this.#store.setPlan(ctx.agentSessionId, recovered);
+        plan = recovered;
+      }
+    }
     if (!plan || !plan.trim()) {
       console.error(`[phase] ${ctx.agentSessionId} approved but plan is missing — refusing to implement blind`);
       await acts.error(
@@ -157,6 +177,7 @@ export class Orchestrator {
     await acts.thought("Approved — implementing in a sandbox now.");
 
     const { result } = await withSandbox(this.#sbxCfg(), async (sbx) => {
+      this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       await cloneRepo(sbx, this.#sbxCfg());
       return runAgent(sbx, this.#config.anthropicApiKey, implementTask(ctx, plan), this.#relay(acts));
     });
@@ -164,7 +185,7 @@ export class Orchestrator {
     this.#logUsage(`implement ${ctx.agentSessionId}`, result);
     if (result?.kind === "result" && result.text) {
       console.log(`[phase] ${ctx.agentSessionId} → done (PR: ${result.text.slice(0, 100)})`);
-      await acts.response(`Done. PR opened:\n\n${result.text}\n\n_A human review + merge closes this out._`);
+      await acts.response(`Done. PR opened:\n\n${result.text}\n\n_A human review + merge closes this out._${costLine(result)}`);
       this.#store.setPhase(ctx.agentSessionId, "done");
     } else {
       console.error(`[phase] ${ctx.agentSessionId} → error (implement did not complete)`);
