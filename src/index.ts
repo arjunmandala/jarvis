@@ -1,3 +1,4 @@
+import "./logger.ts";
 import { execSync } from "node:child_process";
 import { serve } from "@hono/node-server";
 import { loadConfig } from "./config.ts";

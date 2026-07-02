@@ -1,4 +1,5 @@
 // Failure-pattern report over run telemetry. Usage: npm run report
+import "./logger.ts";
 import { DatabaseSync } from "node:sqlite";
 
 const db = new DatabaseSync(process.env.JARVIS_DB ?? "jarvis.db", { readOnly: true });

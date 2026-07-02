@@ -1,3 +1,4 @@
+import "../src/logger.ts";
 import { Template } from "e2b";
 import { join } from "node:path";
 
