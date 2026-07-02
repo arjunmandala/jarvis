@@ -37,6 +37,23 @@ export function toolParameter(input: unknown): string {
   return json && json !== "{}" && json !== "null" ? json.slice(0, 200) : "";
 }
 
+// Extracted so it can be unit-tested without entering withSandbox/e2b: fetches
+// a missing plan via `fetchPlan`, persists it, and returns it — or null if
+// there's nothing to recover. Used by onPrompted before the missing-plan
+// error path.
+export async function recoverPlan(
+  store: Pick<SessionStore, "setPlan">,
+  agentSessionId: string,
+  fetchPlan: ((id: string) => Promise<string | null>) | undefined,
+): Promise<string | null> {
+  if (!fetchPlan) return null;
+  const recovered = await fetchPlan(agentSessionId);
+  if (!recovered || !recovered.trim()) return null;
+  console.log(`[recover] ${agentSessionId} recovered plan from Linear (${recovered.length} chars)`);
+  store.setPlan(agentSessionId, recovered);
+  return recovered;
+}
+
 export class Orchestrator {
   #config: Config;
   #store: SessionStore;
@@ -156,13 +173,8 @@ export class Orchestrator {
       return;
     }
     let plan = row.plan;
-    if ((!plan || !plan.trim()) && this.#fetchPlan) {
-      const recovered = await this.#fetchPlan(ctx.agentSessionId);
-      if (recovered && recovered.trim()) {
-        console.log(`[recover] ${ctx.agentSessionId} recovered plan from Linear (${recovered.length} chars)`);
-        this.#store.setPlan(ctx.agentSessionId, recovered);
-        plan = recovered;
-      }
+    if (!plan || !plan.trim()) {
+      plan = await recoverPlan(this.#store, ctx.agentSessionId, this.#fetchPlan);
     }
     if (!plan || !plan.trim()) {
       console.error(`[phase] ${ctx.agentSessionId} approved but plan is missing — refusing to implement blind`);

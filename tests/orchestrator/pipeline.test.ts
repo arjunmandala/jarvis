@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { nextPhase, toolParameter, Orchestrator } from "../../src/orchestrator/pipeline.ts";
+import { nextPhase, toolParameter, Orchestrator, recoverPlan } from "../../src/orchestrator/pipeline.ts";
 import { SessionStore } from "../../src/store/sessions.ts";
 import type { Activities } from "../../src/linear/activities.ts";
 import type { IssueContext } from "../../src/linear/context.ts";
@@ -157,19 +157,43 @@ describe("onPrompted plan recovery from Linear", () => {
     store.close();
   });
 
-  it("persists the recovered plan via store.setPlan before attempting the sandbox run", async () => {
+});
+
+describe("recoverPlan", () => {
+  it("persists the recovered plan via store.setPlan and returns it", async () => {
     const store = new SessionStore(":memory:");
     store.upsert("as_r3", "await_approval", "iss");
-    const log: string[] = [];
     const fetchPlan = async () => "recovered plan text";
-    // No real e2b credentials -> withSandbox/Sandbox.create will reject; the
-    // orchestrator's onPrompted does not catch that, so the promise rejects,
-    // but the persistence happens (via fetchPlan await + store.setPlan) before
-    // the sandbox call, so we can assert on the store regardless of the outcome.
-    const orch = new Orchestrator({ e2bApiKey: "", e2bTemplate: "", ghToken: "", targetRepo: "" } as Config, store, () => fakeActs(log), fetchPlan);
-    await orch.onPrompted(ctxFor("as_r3"), "approve").catch(() => undefined);
+    const result = await recoverPlan(store, "as_r3", fetchPlan);
+    expect(result).toBe("recovered plan text");
     expect(store.get("as_r3")?.plan).toBe("recovered plan text");
-    expect(log.some((l) => l.startsWith("[recover]"))).toBe(false); // recover is console.log, not an activity
+    store.close();
+  });
+
+  it("returns null and does not persist when fetchPlan is undefined", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_r4", "await_approval", "iss");
+    const result = await recoverPlan(store, "as_r4", undefined);
+    expect(result).toBeNull();
+    expect(store.get("as_r4")?.plan).toBeFalsy();
+    store.close();
+  });
+
+  it("returns null and does not persist when fetchPlan resolves to null", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_r5", "await_approval", "iss");
+    const result = await recoverPlan(store, "as_r5", async () => null);
+    expect(result).toBeNull();
+    expect(store.get("as_r5")?.plan).toBeFalsy();
+    store.close();
+  });
+
+  it("returns null and does not persist when fetchPlan resolves to an empty/whitespace string", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_r6", "await_approval", "iss");
+    const result = await recoverPlan(store, "as_r6", async () => "   ");
+    expect(result).toBeNull();
+    expect(store.get("as_r6")?.plan).toBeFalsy();
     store.close();
   });
 });
