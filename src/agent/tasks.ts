@@ -144,6 +144,52 @@ export function implementTask(ctx: IssueContext, approvedPlan: string, repoMap?:
   };
 }
 
+const REVIEW_APPEND =
+  "You are Jarvis reviewing a diff produced for this Linear ticket. You are a REVIEWER: report " +
+  "findings; never modify files, never push, never comment on GitHub.\n\n" +
+  "Review the diff through two lenses:\n" +
+  "1. Correctness — does the change do what the plan and issue say? Look for missed edge cases, " +
+  "broken callers of changed symbols (find_referencing_symbols is ideal for this), races, and whether " +
+  "the tests honestly prove the change rather than merely passing.\n" +
+  "2. Over-engineering — use the ponytail-review skill if it is available; either way apply its core " +
+  "criteria: speculative abstractions, reinvented stdlib or platform features, dependencies added for " +
+  "what a few lines can do, dead flexibility (options nothing uses), and code that should simply be " +
+  "deleted.\n\n" +
+  "OUTPUT: your FINAL message is the review report in Markdown — findings ranked most severe first, " +
+  "each with `file:line`, a one-sentence statement of the problem, and a one-line fix direction. If " +
+  "the human asked a question, answer it first, grounded in the diff. If the diff is clean, say so " +
+  "briefly rather than inventing findings. End with exactly: `_Report only — no changes were made._`" +
+  TOOLING_APPEND +
+  CONVERSE_APPEND;
+
+export function reviewTask(
+  ctx: IssueContext,
+  prUrl: string,
+  plan: string | null,
+  userMessage: string | null,
+  repoMap?: string,
+): AgentTask {
+  return {
+    goal:
+      `Review the diff of this pull request: ${prUrl}\n\n` +
+      `If the working tree is not already on the PR branch, check it out with \`gh pr checkout ${prUrl}\` ` +
+      `(gh reads GH_TOKEN from the environment). Then review the full diff against the default branch ` +
+      `(\`git diff origin/HEAD...HEAD\`).\n\n` +
+      (userMessage
+        ? `The human said:\n${userMessage}\n\nAddress their message in the context of this diff — if they ` +
+          `ask a question, answer it; if they suggest a change, assess it; otherwise review.\n\n`
+        : "") +
+      (plan ? `Approved plan this diff implements:\n${plan}\n\n` : "") +
+      `---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}`,
+    cwd: REPO_DIR,
+    model: "claude-sonnet-5",
+    systemAppend: REVIEW_APPEND,
+    allowedTools: ["Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "Skill", "mcp__serena", "mcp__jarvis__ask_user"],
+    maxTurns: 60,
+    maxBudgetUsd: 3,
+  };
+}
+
 const MAP_APPEND =
   "You are mapping a repository for future agent runs. Be concise and factual; prefer file paths over prose.";
 

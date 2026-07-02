@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planTask, implementTask, mapTask, reviseTask } from "../../src/agent/tasks.ts";
+import { planTask, implementTask, mapTask, reviseTask, reviewTask } from "../../src/agent/tasks.ts";
 import type { IssueContext } from "../../src/linear/context.ts";
 
 const ctx: IssueContext = {
@@ -179,5 +179,31 @@ describe("tool allowlists", () => {
     expect(t.allowedTools).toContain("WebSearch");
     expect(t.allowedTools).toContain("WebFetch");
     expect(t.allowedTools).toContain("mcp__serena");
+  });
+});
+
+describe("reviewTask", () => {
+  const url = "https://github.com/o/r/pull/9";
+
+  it("is read-only: no Edit/Write, has Bash for git", () => {
+    const t = reviewTask(ctxA, url, "the plan", null);
+    expect(t.allowedTools).toContain("Bash");
+    expect(t.allowedTools).not.toContain("Edit");
+    expect(t.allowedTools).not.toContain("Write");
+  });
+
+  it("puts per-run content in goal, keeps append byte-stable", () => {
+    const a = reviewTask(ctxA, url, "plan text", "please check error handling");
+    const b = reviewTask(ctxB, "https://github.com/o/r/pull/10", null, null);
+    expect(a.goal).toContain(url);
+    expect(a.goal).toContain("plan text");
+    expect(a.goal).toContain("please check error handling");
+    expect(a.systemAppend).toBe(b.systemAppend);
+  });
+
+  it("uses sonnet and instructs report-only", () => {
+    const t = reviewTask(ctxA, url, null, null);
+    expect(t.model).toBe("claude-sonnet-5");
+    expect(t.systemAppend).toContain("Report only");
   });
 });
