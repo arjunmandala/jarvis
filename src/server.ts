@@ -48,6 +48,14 @@ export function makeServer(config: Config): Hono {
       void orchestrator
         .onCreated(ctx)
         .catch((e) => {
+          // A "stop" mid-run kills the sandbox, which makes the in-flight
+          // runAgent command reject here with a transport error. steer()
+          // already posted "Stopped mid-run." for this session — don't post
+          // a contradictory error right after it; just log for diagnostics.
+          if (store.get(ctx.agentSessionId)?.phase === "done") {
+            console.error(`[error] onCreated ${ctx.agentSessionId} (suppressed, session already stopped):`, e?.message ?? e);
+            return;
+          }
           console.error(`[error] onCreated ${ctx.agentSessionId}:`, e?.message ?? e);
           acts.error(String(e?.message ?? e)).catch(() => undefined);
         })
@@ -78,6 +86,12 @@ export function makeServer(config: Config): Hono {
       void orchestrator
         .onPrompted(ctx, reply)
         .catch((e) => {
+          // Same stop-kill race as onCreated above: don't contradict a
+          // "Stopped mid-run." post with a follow-up error.
+          if (store.get(ctx.agentSessionId)?.phase === "done") {
+            console.error(`[error] onPrompted ${ctx.agentSessionId} (suppressed, session already stopped):`, e?.message ?? e);
+            return;
+          }
           console.error(`[error] onPrompted ${ctx.agentSessionId}:`, e?.message ?? e);
           acts.error(String(e?.message ?? e)).catch(() => undefined);
         })
