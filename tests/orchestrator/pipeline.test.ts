@@ -249,6 +249,28 @@ describe("reconcile", () => {
     store.close();
   });
 
+  it("(d) PR_FAILED sentinel in the implement result fails loud instead of posting success", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_rc5", "implement", "iss");
+    store.setSandbox("as_rc5", "sbx-pf");
+    const log: string[] = [];
+    const resultEvent = JSON.stringify({
+      kind: "result",
+      subtype: "success",
+      text: "PR_FAILED: gh auth broken",
+      costUsd: 0.1,
+      sessionId: null,
+    });
+    const { sbx } = fakeSandbox(resultEvent);
+    const connect = async () => sbx;
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log), undefined, connect);
+    await orch.reconcile();
+    expect(log.some((l) => l.startsWith("error:"))).toBe(true);
+    expect(log.some((l) => l.startsWith("response:"))).toBe(false); // not "Done. PR opened"
+    expect(store.get("as_rc5")?.phase).toBe("error");
+    store.close();
+  });
+
   it("errors a stuck row when connect fails, setting phase=error and not throwing", async () => {
     const store = new SessionStore(":memory:");
     store.upsert("as_rc4", "implement", "iss");

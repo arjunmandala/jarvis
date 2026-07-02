@@ -240,7 +240,11 @@ export class Orchestrator {
   // (error). Called from onPrompted and, after a restart, from reconcile.
   async #finishImplement(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
     this.#logUsage(`implement ${agentSessionId}`, result);
-    if (result?.kind === "result" && result.text) {
+    const text = result?.kind === "result" && result.text ? result.text.trim() : "";
+    if (text.startsWith("PR_FAILED:")) {
+      console.error(`[phase] ${agentSessionId} → error (PR creation failed: ${text.slice(0, 100)})`);
+      await this.#failLoud(agentSessionId, acts, `PR could not be opened: ${text.slice("PR_FAILED:".length).trim()}`);
+    } else if (result?.kind === "result" && result.text) {
       console.log(`[phase] ${agentSessionId} → done (PR: ${result.text.slice(0, 100)})`);
       try {
         await acts.response(`Done. PR opened:\n\n${result.text}\n\n_A human review + merge closes this out._${costLine(result)}`);

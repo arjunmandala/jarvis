@@ -195,6 +195,11 @@ export async function runAgent(
   onEvent: (e: JarvisEvent) => void | Promise<void>,
 ): Promise<{ result: JarvisEvent | null; exitCode: number }> {
   const taskPath = "/tmp/jarvis-task.json";
+  // Sandbox reuse (e.g. map run then plan run in one sandbox) must not leak the
+  // previous run's RESULT_FILE: clear it before starting a new runner so
+  // watchDetached can't win the race on stale data (an empty file parses to
+  // null via readResultFile).
+  await sbx.files.write(RESULT_FILE, "");
   await sbx.files.write(taskPath, JSON.stringify(task));
 
   const parser = new LineParser();
