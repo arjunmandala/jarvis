@@ -115,6 +115,19 @@ const askUser = tool(
   },
 );
 
+// Serena (semantic retrieval MCP). ponytail: presence check only — if the
+// template lacks the binary the run continues with Grep/Glob; never crash a
+// run over a retrieval optimization.
+const SERENA_BIN = "/usr/local/bin/serena";
+const mcpServers = { jarvis: createSdkMcpServer({ name: "jarvis", version: "1.0.0", tools: [askUser] }) };
+if (existsSync(SERENA_BIN)) {
+  mcpServers.serena = {
+    type: "stdio",
+    command: SERENA_BIN,
+    args: ["start-mcp-server", "--context", "ide-assistant", "--project", task.cwd],
+  };
+}
+
 let lastResult = null;
 try {
   const toolNames = new Map(); // tool_use id -> name, to label tool_results
@@ -130,7 +143,7 @@ try {
       permissionMode: "bypassPermissions", // safe: the sandbox is the isolation boundary
       maxTurns: task.maxTurns,
       maxBudgetUsd: task.maxBudgetUsd,
-      mcpServers: { jarvis: createSdkMcpServer({ name: "jarvis", version: "1.0.0", tools: [askUser] }) },
+      mcpServers,
     },
   })) {
     if (message.type === "assistant") {

@@ -6,6 +6,7 @@ import {
   watchDetached,
   runAgent,
   injectMessage,
+  indexRepo,
   type AgentSandbox,
 } from "../../src/sandbox/session.ts";
 import type { JarvisEvent } from "../../src/agent/events.ts";
@@ -273,6 +274,30 @@ describe("injectMessage", () => {
     expect(m).toBeTruthy();
     const decoded = JSON.parse(Buffer.from(m![1], "base64").toString("utf8"));
     expect(decoded.text).toBe('use approach "B" — it\'s better\nthanks');
+  });
+});
+
+describe("indexRepo", () => {
+  it("swallows a failing index command (advisory)", async () => {
+    const sbx = {
+      commands: {
+        run: async () => ({ exitCode: 1, stdout: "", stderr: "serena: not found" }),
+        list: async () => [],
+      },
+      files: { read: async () => "", write: async () => undefined },
+    };
+    await expect(indexRepo(sbx as never)).resolves.toBeUndefined();
+  });
+
+  it("swallows a throwing command", async () => {
+    const sbx = {
+      commands: {
+        run: async () => { throw new Error("transport down"); },
+        list: async () => [],
+      },
+      files: { read: async () => "", write: async () => undefined },
+    };
+    await expect(indexRepo(sbx as never)).resolves.toBeUndefined();
   });
 });
 
