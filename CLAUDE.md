@@ -171,14 +171,23 @@ and `mcp__serena` on top of its existing tools:
 | `mapTask()` | sonnet-5 | Read/Glob/Grep | one-time per repo, cached in `repo_maps` table, injected into all later tasks for that repo |
 | `planTask()` | sonnet-5 | Read/Glob/Grep/Bash/web/serena/Skill/ask_user | read-only; final message = the plan (returned verbatim to the human) |
 | `reviseTask()` | sonnet-5 | same as plan | plan + human feedback → revised plan |
-| `implementTask()` | opus-4-8 | + Edit/Write/Bash/web/serena/Skill/Agent | approved plan → code, tests, push, `gh pr create`; final message must be exactly the PR URL, or `PR_FAILED: <reason>` |
+| `implementTask()` | sonnet-5 **or** opus-4-8 (routed) | + Edit/Write/Bash/web/serena/Skill/Agent | approved plan → code, tests, push, `gh pr create`; final message must be exactly the PR URL, or `PR_FAILED: <reason>` |
 | `reviewTask()` | sonnet-5 | Read/Glob/Grep/Bash/web/serena/Skill/ask_user | self-review of big diffs + on-demand PR review; final message = the report |
+
+Each task also carries an `effort` hint (`map`=low, `plan`/`revise`/`review`=medium,
+`implement`=high) — the Agent SDK default is `high`; lowering it on bounded tasks cuts
+thinking-token spend and, via fewer/faster turns, prompt-cache misses. `implementTask()`
+routes its model from the plan's `Type:`/`Scope:` header (`routeImplement`): a small,
+non-refactor change → sonnet-5 (near-Opus on coding, ~2.5× cheaper) at a $3 cap; large
+work or any refactor → opus-4-8 at $8. A missing/garbled header defaults to opus-4-8
+(no regression). `runner.mjs` sums per-turn usage into a **cumulative** `usage` on the
+result (the SDK's own `result.usage` is only the final turn) and registers serena only
+when a task's `allowedTools` include it.
 
 `systemAppend` strings are **fixed, byte-stable text** (never interpolate per-run
 content into them) so the Agent SDK's prompt cache hits across runs — per-run content
-(issue body, repo map, plan) goes in `goal` instead. Task sizing is delegated to the
-agent itself via prompt instructions (small change → skip subagents/re-review; larger
-work → `subagent-driven-development` + `test-driven-development` + `requesting-code-review`).
+(issue body, repo map, plan) goes in `goal` instead. The plan's first two lines are the
+fixed contract `Type: <…>` / `Scope: <small|large>`; `implementTask` parses them to route.
 
 ### Linear integration (`src/linear/`)
 

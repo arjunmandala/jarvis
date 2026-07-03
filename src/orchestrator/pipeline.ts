@@ -151,9 +151,10 @@ export class Orchestrator {
         outcome,
         costUsd: result?.kind === "result" ? result.costUsd : null,
         numTurns: result?.kind === "result" ? (result.numTurns ?? null) : null,
-        tokensIn: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
+        tokensIn: u.input_tokens ?? 0, // uncached input; cache tokens tracked separately below
         tokensOut: u.output_tokens ?? 0,
         tokensCacheRead: u.cache_read_input_tokens ?? 0,
+        tokensCacheWrite: u.cache_creation_input_tokens ?? 0,
         error: result?.kind === "error" ? result.message : null,
       });
     } catch (err) {

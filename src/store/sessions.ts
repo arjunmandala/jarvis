@@ -21,6 +21,7 @@ export interface RunFinish {
   tokensIn: number;
   tokensOut: number;
   tokensCacheRead: number;
+  tokensCacheWrite: number;
   error: string | null;
 }
 
@@ -78,6 +79,12 @@ export class SessionStore {
         error             TEXT
       ) STRICT
     `);
+    // Migration: older DBs lack tokens_cache_write (cache-creation is the main
+    // cost driver, so the report needs it broken out from tokens_in).
+    const runCols = this.#db.prepare(`SELECT name FROM pragma_table_info('runs')`).all() as { name: string }[];
+    if (!runCols.some((c) => c.name === "tokens_cache_write")) {
+      this.#db.exec(`ALTER TABLE runs ADD COLUMN tokens_cache_write INTEGER`);
+    }
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS run_events (
         id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,12 +131,12 @@ export class SessionStore {
     this.#db
       .prepare(
         `UPDATE runs SET ended_at = ?, outcome = ?, cost_usd = ?, num_turns = ?,
-                tokens_in = ?, tokens_out = ?, tokens_cache_read = ?, error = ?
+                tokens_in = ?, tokens_out = ?, tokens_cache_read = ?, tokens_cache_write = ?, error = ?
          WHERE id = ?`,
       )
       .run(
         new Date().toISOString(), f.outcome, f.costUsd, f.numTurns,
-        f.tokensIn, f.tokensOut, f.tokensCacheRead, f.error, runId,
+        f.tokensIn, f.tokensOut, f.tokensCacheRead, f.tokensCacheWrite, f.error, runId,
       );
   }
 

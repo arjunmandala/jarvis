@@ -62,6 +62,32 @@ describe("implementTask", () => {
   });
 });
 
+describe("implement model routing (by plan Type/Scope)", () => {
+  const small = "Type: feature\nScope: small\n\n## Plan\n- tweak the button";
+  const large = "Type: feature\nScope: large\n\n## Plan\n- rework the dashboard";
+  const refactorSmall = "Type: refactor\nScope: small\n\n## Plan\n- rename a helper";
+
+  it("routes a small, unambiguous change to Sonnet 5 with a tighter budget", () => {
+    const t = implementTask(ctx, small);
+    expect(t.model).toBe("claude-sonnet-5");
+    expect(t.maxBudgetUsd).toBe(3);
+  });
+
+  it("keeps large work on Opus 4.8", () => {
+    const t = implementTask(ctx, large);
+    expect(t.model).toBe("claude-opus-4-8");
+    expect(t.maxBudgetUsd).toBe(8);
+  });
+
+  it("keeps every refactor on Opus even when scoped small (behaviour-preservation)", () => {
+    expect(implementTask(ctx, refactorSmall).model).toBe("claude-opus-4-8");
+  });
+
+  it("defaults to Opus when the header is missing or garbled (no regression)", () => {
+    expect(implementTask(ctx, "## Plan\n- no header").model).toBe("claude-opus-4-8");
+  });
+});
+
 describe("planTask repo map injection", () => {
   it("injects the repo map into the goal when provided", () => {
     const t = planTask(ctx, "MAP");

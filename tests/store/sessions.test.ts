@@ -120,7 +120,7 @@ describe("run telemetry", () => {
     expect(runId).toBeGreaterThan(0);
     store.finishRun(runId, {
       outcome: "success", costUsd: 0.5, numTurns: 12,
-      tokensIn: 1000, tokensOut: 200, tokensCacheRead: 800, error: null,
+      tokensIn: 1000, tokensOut: 200, tokensCacheRead: 800, tokensCacheWrite: 300, error: null,
     });
     // second run gets a distinct id
     expect(store.createRun("as_t1", "implement", "owner/repo")).toBe(runId + 1);

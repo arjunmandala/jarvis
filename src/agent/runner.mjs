@@ -120,7 +120,10 @@ const askUser = tool(
 // run over a retrieval optimization.
 const SERENA_BIN = "/usr/local/bin/serena";
 const mcpServers = { jarvis: createSdkMcpServer({ name: "jarvis", version: "1.0.0", tools: [askUser] }) };
-if (existsSync(SERENA_BIN)) {
+// Only register serena when the task actually allows it — otherwise a task like
+// mapTask (Read/Glob/Grep only) pays serena's MCP cold-start for nothing.
+const wantsSerena = Array.isArray(task.allowedTools) && task.allowedTools.some((t) => t === "mcp__serena" || t.startsWith("mcp__serena__"));
+if (wantsSerena && existsSync(SERENA_BIN)) {
   mcpServers.serena = {
     type: "stdio",
     command: SERENA_BIN,
@@ -129,6 +132,10 @@ if (existsSync(SERENA_BIN)) {
 }
 
 let lastResult = null;
+// Cumulative token usage across every assistant turn. The SDK's result.usage is
+// only the FINAL turn's snapshot, which badly undercounts a multi-turn run —
+// summing per-assistant usage is what makes cost/cache telemetry honest.
+const totals = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
 try {
   const toolNames = new Map(); // tool_use id -> name, to label tool_results
   for await (const message of query({
@@ -136,6 +143,7 @@ try {
     options: {
       cwd: task.cwd,
       model: task.model,
+      ...(task.effort ? { effort: task.effort } : {}),
       // excludeDynamicSections keeps the preset byte-stable across sandboxes so the prompt cache hits (Phase 4.2)
       systemPrompt: { type: "preset", preset: "claude_code", append: task.systemAppend, excludeDynamicSections: true },
       settingSources: ["user", "project"], // REQUIRED so superpowers skills load
@@ -147,6 +155,13 @@ try {
     },
   })) {
     if (message.type === "assistant") {
+      const u = message.message?.usage;
+      if (u) {
+        totals.input_tokens += u.input_tokens ?? 0;
+        totals.output_tokens += u.output_tokens ?? 0;
+        totals.cache_creation_input_tokens += u.cache_creation_input_tokens ?? 0;
+        totals.cache_read_input_tokens += u.cache_read_input_tokens ?? 0;
+      }
       for (const block of message.message.content) {
         if (block.type === "text") emit({ kind: "assistant_text", text: block.text });
         else if (block.type === "tool_use") {
@@ -174,7 +189,7 @@ try {
         text: message.subtype === "success" ? message.result : null,
         costUsd: message.total_cost_usd ?? null,
         sessionId: message.session_id ?? null,
-        usage: message.usage ?? null,
+        usage: { ...totals }, // cumulative across the whole run, not the final turn
         numTurns: message.num_turns ?? null,
       };
       emit(lastResult);

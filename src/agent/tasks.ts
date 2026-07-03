@@ -1,6 +1,8 @@
 import type { IssueContext } from "../linear/context.ts";
 import { REPO_DIR } from "../sandbox/session.ts";
 
+export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+
 export interface AgentTask {
   goal: string;
   cwd: string;
@@ -9,6 +11,10 @@ export interface AgentTask {
   allowedTools: string[];
   maxTurns: number;
   maxBudgetUsd: number;
+  // Reasoning-effort hint passed to the Agent SDK (default is `high`). Lower on
+  // bounded tasks (map/review/plan) to cut thinking-token spend and consolidate
+  // tool calls — fewer, faster turns also miss the 5-min prompt cache less often.
+  effort?: EffortLevel;
 }
 
 // Appended to both plan and implement system prompts. Fixed text — never fold
@@ -31,8 +37,12 @@ const TOOLING_APPEND =
 
 const PLAN_APPEND =
   "You are Jarvis, an autonomous engineer working a Linear ticket.\n\n" +
-  "CLASSIFY FIRST: decide what kind of issue this is, and make the FIRST line of your plan exactly " +
-  "`Type: <one of: bug, feature, refactor, chore, investigation>`. Then follow that type's playbook:\n" +
+  "CLASSIFY FIRST: the first TWO lines of your plan must be exactly:\n" +
+  "`Type: <one of: bug, feature, refactor, chore, investigation>`\n" +
+  "`Scope: <small|large>` — small = roughly 2 or fewer files and no design ambiguity; large = " +
+  "multiple files, cross-cutting changes, or real design choices. Be honest: this line routes how the " +
+  "implementation is run.\n" +
+  "Then follow that type's playbook:\n" +
   "- bug: reproduce the failure FIRST (run the failing test or command with Bash), trace it to a root " +
   "cause, and plan the minimal fix plus a regression test. Use the systematic-debugging skill when the " +
   "cause is not obvious.\n" +
@@ -48,7 +58,7 @@ const PLAN_APPEND =
   "Keep the plan proportional to the issue: a small fix gets a handful of bullets naming the exact " +
   "files and changes, nothing more.\n\n" +
   "Your FINAL message must be the complete implementation plan in Markdown, starting with the `Type:` " +
-  "line — that text is returned verbatim to the human for approval. Do not write any files." +
+  "and `Scope:` lines — that text is returned verbatim to the human for approval. Do not write any files." +
   TOOLING_APPEND +
   CONVERSE_APPEND;
 
@@ -106,6 +116,7 @@ export function planTask(ctx: IssueContext, repoMap?: string): AgentTask {
     allowedTools: ["Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "Skill", "mcp__serena", "mcp__jarvis__ask_user"],
     maxTurns: 40,
     maxBudgetUsd: 2,
+    effort: "medium", // planning is bounded read-only work; `high` over-explores
   };
 }
 
@@ -123,10 +134,28 @@ export function reviseTask(ctx: IssueContext, previousPlan: string, feedback: st
     allowedTools: ["Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "Skill", "mcp__serena", "mcp__jarvis__ask_user"],
     maxTurns: 40,
     maxBudgetUsd: 2,
+    effort: "medium",
   };
 }
 
+// Route implement by the plan's own Type/Scope header (the human approved it).
+// A small, unambiguous change goes to Sonnet 5 (near-Opus on coding, ~2.5x
+// cheaper); anything large — and every refactor, which is behaviour-preservation
+// critical — stays on Opus 4.8. Missing/garbled header → Opus (no regression,
+// just no saving). ponytail: header-regex, not a classifier; the ceiling is a
+// plan that lies about its scope, which the human sees and can push back on.
+function routeImplement(plan: string): { model: string; effort: EffortLevel; maxBudgetUsd: number } {
+  const header = plan.slice(0, 400).toLowerCase();
+  const type = /type:\s*(bug|feature|refactor|chore|investigation)/.exec(header)?.[1];
+  const scope = /scope:\s*(small|large)/.exec(header)?.[1];
+  const small = scope === "small" && type !== "refactor";
+  return small
+    ? { model: "claude-sonnet-5", effort: "high", maxBudgetUsd: 3 }
+    : { model: "claude-opus-4-8", effort: "high", maxBudgetUsd: 8 };
+}
+
 export function implementTask(ctx: IssueContext, approvedPlan: string, repoMap?: string): AgentTask {
+  const route = routeImplement(approvedPlan);
   return {
     goal:
       `Implement the following APPROVED plan, push with \`git push origin <branch>\` (origin's URL already ` +
@@ -136,11 +165,12 @@ export function implementTask(ctx: IssueContext, approvedPlan: string, repoMap?:
       `with \`PR_FAILED:\` followed by the reason.\n\n` +
       `${approvedPlan}\n\n---\nOriginal issue:\n${issueBlock(ctx)}${repoMapBlock(repoMap)}`,
     cwd: REPO_DIR,
-    model: "claude-opus-4-8", // hard task
+    model: route.model, // small/unambiguous → Sonnet 5; large or refactor → Opus 4.8
     systemAppend: IMPLEMENT_APPEND,
     allowedTools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "Monitor", "WebSearch", "WebFetch", "Skill", "Agent", "mcp__serena", "mcp__jarvis__ask_user"],
     maxTurns: 200,
-    maxBudgetUsd: 8,
+    maxBudgetUsd: route.maxBudgetUsd,
+    effort: route.effort,
   };
 }
 
@@ -192,6 +222,7 @@ export function reviewTask(
     allowedTools: ["Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "Skill", "mcp__serena", "mcp__jarvis__ask_user"],
     maxTurns: 60,
     maxBudgetUsd: 3,
+    effort: "medium",
   };
 }
 
@@ -211,5 +242,6 @@ export function mapTask(): AgentTask {
     allowedTools: ["Read", "Glob", "Grep"],
     maxTurns: 30,
     maxBudgetUsd: 1,
+    effort: "low", // one-time factual file/module listing; cached and reused
   };
 }
