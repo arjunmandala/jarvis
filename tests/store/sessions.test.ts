@@ -198,3 +198,14 @@ describe("branch column", () => {
     store.close();
   });
 });
+
+describe("work branch", () => {
+  it("round-trips work_branch and defaults to null", () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_wb", "implement", "iss_1");
+    expect(store.get("as_wb")?.workBranch).toBeNull();
+    store.setWorkBranch("as_wb", "jarvis/iss_1");
+    expect(store.get("as_wb")?.workBranch).toBe("jarvis/iss_1");
+    store.close();
+  });
+});
