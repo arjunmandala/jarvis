@@ -303,12 +303,14 @@ export class SessionStore {
   }
 
   // Session memory: every session for an issue (including the asking one),
-  // oldest-first — the source list for thread assembly and log export.
+  // oldest-first by creation — the source list for thread assembly and log
+  // export. rowid, not updated_at: setters (setPhase on a done⇄review reply,
+  // retirePrior on resume) re-stamp updated_at and would scramble chronology.
   listByIssue(issueId: string): SessionRow[] {
     const rows = this.#db
       .prepare(
         `SELECT agent_session_id, phase, issue_id, branch, work_branch, plan, sandbox_id, pr_url, review, updated_at
-         FROM sessions WHERE issue_id = ? ORDER BY updated_at ASC`,
+         FROM sessions WHERE issue_id = ? ORDER BY rowid ASC`,
       )
       .all(issueId) as {
       agent_session_id: string; phase: Phase; issue_id: string | null;

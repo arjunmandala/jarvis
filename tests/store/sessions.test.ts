@@ -249,6 +249,18 @@ describe("listByIssue and getRunLogsBySession", () => {
     s.close();
   });
 
+  it("listByIssue keeps creation order even when an older session is touched later", () => {
+    const s = new SessionStore(":memory:");
+    s.upsert("as_h1", "done", "iss_h");
+    s.upsert("as_h2", "done", "iss_h");
+    // A done⇄review reply on the OLD session bumps its updated_at past as_h2's;
+    // creation order must survive (ordering is by rowid, not updated_at).
+    s.setPhase("as_h1", "review");
+    s.setPhase("as_h1", "done");
+    expect(s.listByIssue("iss_h").map((r) => r.agentSessionId)).toEqual(["as_h1", "as_h2"]);
+    s.close();
+  });
+
   it("getRunLogsBySession returns runs oldest-first with events joined as JSONL", () => {
     const s = new SessionStore(":memory:");
     s.upsert("as_h3", "implement", "iss_h3");
