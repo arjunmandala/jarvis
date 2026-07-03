@@ -30,6 +30,7 @@ const template = Template({ fileContextPath: join(import.meta.dirname, "..") })
   .makeDir("/home/user/.claude/skills")
   .copy("vendor/superpowers-skills", "/home/user/.claude/skills")
   .copy("vendor/ponytail-skills", "/home/user/.claude/skills")
+  .copy("vendor/frontend-design-skills", "/home/user/.claude/skills")
   .runCmd("chown -R user:user /home/user/.claude")
   .setUser("user")
   // Pre-warm serena's TS/JS + Python language servers into /home/user so a
