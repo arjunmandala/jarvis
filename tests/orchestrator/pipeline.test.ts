@@ -403,6 +403,26 @@ describe("onCreated resume", () => {
     store.close();
   });
 
+  // A "plan"-phase prior (interrupted revision run) is reconcile-eligible via its
+  // stale sandboxId — resuming must retire it so reconcile doesn't post a stray
+  // error to the dead session.
+  it("retires a plan-phase prior (phase done, sandbox cleared) when reusing its plan", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_old", "plan", "iss_Q");
+    store.setPlan("as_old", "Type: chore\nScope: small\n\n## Plan\n- revise me");
+    store.setSandbox("as_old", "sbx-stale");
+
+    const log: string[] = [];
+    const orch = makeOrchWithFakeSandbox(store, log, {});
+    await orch.onCreated({ agentSessionId: "as_new3", organizationId: "o", issueId: "iss_Q", title: "T", description: "D", comment: "", promptContext: "" });
+
+    expect(store.get("as_old")?.phase).toBe("done");
+    expect(store.get("as_old")?.sandboxId).toBeNull();
+    expect(store.get("as_new3")?.phase).toBe("await_approval");
+    expect(store.get("as_new3")?.plan).toContain("revise me");
+    store.close();
+  });
+
   // F1: re-assigning while the prior run is still LIVE must not start a second
   // concurrent implement run pushing to the same deterministic work branch.
   it("does not start a second run when the prior session is still live", async () => {

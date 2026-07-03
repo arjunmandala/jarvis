@@ -294,7 +294,10 @@ export class Orchestrator {
         return;
       }
       // Planned but never approved — reuse the plan, skip straight to approval.
+      // A "plan"-phase prior (revision run interrupted mid-flight) carries a stale
+      // sandboxId and is in reconcile's phase list — retire it like the others.
       if (prior.phase === "await_approval" || prior.phase === "plan") {
+        retirePrior();
         this.#store.upsert(ctx.agentSessionId, "await_approval", ctx.issueId);
         this.#store.setPlan(ctx.agentSessionId, prior.plan);
         if (prior.branch) this.#store.setBranch(ctx.agentSessionId, prior.branch);
