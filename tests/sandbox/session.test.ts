@@ -7,7 +7,9 @@ import {
   runAgent,
   injectMessage,
   indexRepo,
+  cloneRepo,
   type AgentSandbox,
+  type SandboxConfig,
 } from "../../src/sandbox/session.ts";
 import type { JarvisEvent } from "../../src/agent/events.ts";
 import type { AgentTask } from "../../src/agent/tasks.ts";
@@ -328,5 +330,31 @@ describe("runAgent inbox clearing", () => {
     const { result } = await runAgent(sbx, "key", task, () => undefined);
     expect(result?.kind).toBe("result");
     expect(commandLog[0]).toBe(`rm -f ${RESULT_FILE} ${INBOX_FILE}`);
+  });
+});
+
+describe("cloneRepo", () => {
+  const cfg: SandboxConfig = { apiKey: "k", template: "t", ghToken: "tok", targetRepo: "owner/repo" };
+
+  it("clones the default branch when none is given", async () => {
+    const f = makeFake({});
+    f.sbx.commands.run = async (cmd: string) => {
+      f.commandLog.push(cmd);
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    await cloneRepo(f.sbx as never, cfg);
+    expect(f.commandLog[0]).toBe(`git clone https://x-access-token:tok@github.com/owner/repo.git /home/user/repo`);
+  });
+
+  it("passes -b <branch> when a branch is given", async () => {
+    const f = makeFake({});
+    f.sbx.commands.run = async (cmd: string) => {
+      f.commandLog.push(cmd);
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    await cloneRepo(f.sbx as never, cfg, "feature/foo");
+    expect(f.commandLog[0]).toBe(
+      `git clone -b feature/foo https://x-access-token:tok@github.com/owner/repo.git /home/user/repo`,
+    );
   });
 });

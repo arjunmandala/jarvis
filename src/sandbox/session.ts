@@ -54,11 +54,14 @@ export function redactSecret(text: string, secret: string): string {
   return text.split(secret).join("***");
 }
 
-export async function cloneRepo(sbx: Sandbox, cfg: SandboxConfig): Promise<void> {
+export async function cloneRepo(sbx: Sandbox, cfg: SandboxConfig, branch?: string | null): Promise<void> {
   // Token-in-URL clone of a private repo; GH_TOKEN is also set in env for gh.
   const url = `https://x-access-token:${cfg.ghToken}@github.com/${cfg.targetRepo}.git`;
+  // branch is validated (isValidBranchName) before it ever reaches this
+  // call — see src/linear/context.ts and its callers in orchestrator/pipeline.ts.
+  const branchFlag = branch ? `-b ${branch} ` : "";
   await withRetries("git clone", async () => {
-    const res = await runCommand(sbx, `git clone ${url} ${REPO_DIR}`);
+    const res = await runCommand(sbx, `git clone ${branchFlag}${url} ${REPO_DIR}`);
     if (res.exitCode !== 0) {
       throw new Error(redactSecret(`git clone failed (${res.exitCode}): ${res.stderr}`, cfg.ghToken));
     }
