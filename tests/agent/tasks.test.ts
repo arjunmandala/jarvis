@@ -8,12 +8,10 @@ const ctx: IssueContext = {
 };
 
 describe("planTask", () => {
-  it("is read-only and uses the default model", () => {
+  it("uses the default model and the shared tool set", () => {
     const t = planTask(ctx);
     expect(t.model).toBe("claude-sonnet-5");
     expect(t.allowedTools).toEqual(expect.arrayContaining(["Read", "Glob", "Grep", "Skill"]));
-    expect(t.allowedTools).not.toContain("Write");
-    expect(t.allowedTools).not.toContain("Edit");
     expect(t.goal).toContain("Add /health");
     expect(t.cwd).toBe("/home/user/repo");
   });
@@ -165,7 +163,7 @@ describe("mapTask", () => {
     expect(t.allowedTools).not.toContain("Bash");
     expect(t.cwd).toBe("/home/user/repo");
     expect(t.goal).toMatch(/map/i);
-    expect(t.maxTurns).toBe(30);
+    expect(t.maxTurns).toBe(20);
     expect(t.maxBudgetUsd).toBe(1);
   });
 });
@@ -227,11 +225,9 @@ describe("tool allowlists", () => {
 describe("reviewTask", () => {
   const url = "https://github.com/o/r/pull/9";
 
-  it("is read-only: no Edit/Write, has Bash for git", () => {
+  it("has Bash for git (prompt-level read-only; tools are the shared permissive set)", () => {
     const t = reviewTask(ctxA, url, "the plan", null);
     expect(t.allowedTools).toContain("Bash");
-    expect(t.allowedTools).not.toContain("Edit");
-    expect(t.allowedTools).not.toContain("Write");
   });
 
   it("puts per-run content in goal, keeps append byte-stable", () => {
@@ -247,5 +243,22 @@ describe("reviewTask", () => {
     const t = reviewTask(ctxA, url, null, null);
     expect(t.model).toBe("claude-sonnet-5");
     expect(t.systemAppend).toContain("Report only");
+  });
+});
+
+describe("turn caps and unified tools", () => {
+  it("caps turns lower now that runs are resumable", () => {
+    expect(planTask(ctx).maxTurns).toBe(25);
+    expect(reviewTask(ctx, "url", null, null).maxTurns).toBe(40);
+    expect(mapTask().maxTurns).toBe(20);
+    expect(implementTask(ctx, "## Plan").maxTurns).toBe(120);
+  });
+
+  it("plan, revise, implement and review share one permissive tool set", () => {
+    const p = planTask(ctx).allowedTools;
+    for (const t of [reviseTask(ctx, "p", "f"), implementTask(ctx, "p"), reviewTask(ctx, "u", null, null)]) {
+      expect(t.allowedTools).toEqual(p);
+    }
+    expect(p).toEqual(expect.arrayContaining(["Read", "Glob", "Grep", "Bash", "Edit", "Write", "Agent", "Skill", "mcp__serena", "mcp__jarvis__ask_user"]));
   });
 });
