@@ -656,10 +656,22 @@ export class Orchestrator {
         // review is advisory: recover to done (retryable by replying), not error
         const fail = (message: string) =>
           row.phase === "review" ? this.#finishReview(id, acts, null) : this.#failLoud(id, acts, message);
+        // implement-phase failures get resume guidance instead of "start over" —
+        // Task 4's findResumableByIssue picks this up on the next `created` webhook.
+        const failImplement = (why: string) =>
+          this.#failLoud(
+            id,
+            acts,
+            `${why} Re-assign to resume from the saved plan and pushed branch — no re-planning needed.`,
+          );
+        const failStuck =
+          row.phase === "implement"
+            ? (why: string) => failImplement(why)
+            : (why: string) => fail(`${why} Re-assign the issue to retry.`);
         try {
           if (!row.sandboxId) {
             console.log(`[reconcile] ${id} phase=${row.phase} has no sandboxId — failing loud`);
-            await fail("A restart interrupted this run before its sandbox was recorded — re-assign the issue to retry.");
+            await failStuck("A restart interrupted this run before its sandbox was recorded.");
             return;
           }
           console.log(`[reconcile] ${id} phase=${row.phase} re-attaching to sandbox ${row.sandboxId}`);
@@ -668,14 +680,14 @@ export class Orchestrator {
             sbx = await this.#connect(row.sandboxId);
           } catch (err) {
             console.error(`[reconcile] ${id} connect failed: ${err instanceof Error ? err.message : String(err)}`);
-            await fail("A restart interrupted this run — re-assign the issue to retry.");
+            await failStuck("A restart interrupted this run.");
             return;
           }
           try {
             const result = await watchDetached(sbx);
             if (!result) {
               console.log(`[reconcile] ${id} no result recovered from sandbox — failing loud`);
-              await fail("A restart interrupted this run — re-assign the issue to retry.");
+              await failStuck("A restart interrupted this run.");
               return;
             }
             console.log(`[reconcile] ${id} recovered result (${result.kind}) — finishing phase=${row.phase}`);

@@ -277,6 +277,26 @@ describe("reconcile", () => {
     expect(store.get("as_rc4")?.phase).toBe("error");
     store.close();
   });
+
+  it("on an unrecoverable implement, keeps the plan/work branch and points the user at a cheap resume", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_i", "implement", "iss_Z");
+    store.setPlan("as_i", "## Plan\n- x");
+    store.setWorkBranch("as_i", "jarvis/iss_Z");
+    store.setSandbox("as_i", "sbx_dead");
+
+    const log: string[] = [];
+    const connect = () => Promise.reject(new Error("Failed to parse URL from [object Request]"));
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log), undefined, connect);
+
+    await orch.reconcile();
+
+    expect(store.get("as_i")?.phase).toBe("error");
+    expect(store.get("as_i")?.plan).toContain("- x"); // plan preserved
+    expect(store.get("as_i")?.workBranch).toBe("jarvis/iss_Z"); // branch preserved
+    expect(log.join("\n")).toMatch(/re-?assign/i);
+    expect(log.join("\n")).toMatch(/resume|pushed|saved/i); // tells user it's cheap
+  });
 });
 
 describe("steer", () => {
