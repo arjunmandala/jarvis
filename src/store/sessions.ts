@@ -1,11 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
 
-export type Phase = "clarify" | "plan" | "await_approval" | "implement" | "review" | "done" | "error";
+export type Phase = "clarify" | "await_branch" | "plan" | "await_approval" | "implement" | "review" | "done" | "error";
 
 export interface SessionRow {
   agentSessionId: string;
   phase: Phase;
   issueId: string | null;
+  branch: string | null;
   plan: string | null;
   sandboxId: string | null;
   prUrl: string | null;
@@ -49,6 +50,9 @@ export class SessionStore {
     }
     if (!cols.some((c) => c.name === "review")) {
       this.#db.exec(`ALTER TABLE sessions ADD COLUMN review TEXT`);
+    }
+    if (!cols.some((c) => c.name === "branch")) {
+      this.#db.exec(`ALTER TABLE sessions ADD COLUMN branch TEXT`);
     }
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS repo_maps (
@@ -172,16 +176,23 @@ export class SessionStore {
       .run(review, new Date().toISOString(), agentSessionId);
   }
 
+  setBranch(agentSessionId: string, branch: string): void {
+    this.#db
+      .prepare(`UPDATE sessions SET branch = ?, updated_at = ? WHERE agent_session_id = ?`)
+      .run(branch, new Date().toISOString(), agentSessionId);
+  }
+
   get(agentSessionId: string): SessionRow | undefined {
     const row = this.#db
       .prepare(
-        `SELECT agent_session_id, phase, issue_id, plan, sandbox_id, pr_url, review, updated_at FROM sessions WHERE agent_session_id = ?`,
+        `SELECT agent_session_id, phase, issue_id, branch, plan, sandbox_id, pr_url, review, updated_at FROM sessions WHERE agent_session_id = ?`,
       )
       .get(agentSessionId) as
       | {
           agent_session_id: string;
           phase: Phase;
           issue_id: string | null;
+          branch: string | null;
           plan: string | null;
           sandbox_id: string | null;
           pr_url: string | null;
@@ -194,6 +205,7 @@ export class SessionStore {
       agentSessionId: row.agent_session_id,
       phase: row.phase,
       issueId: row.issue_id,
+      branch: row.branch,
       plan: row.plan,
       sandboxId: row.sandbox_id,
       prUrl: row.pr_url,
@@ -206,12 +218,13 @@ export class SessionStore {
     const placeholders = phases.map(() => "?").join(", ");
     const rows = this.#db
       .prepare(
-        `SELECT agent_session_id, phase, issue_id, plan, sandbox_id, pr_url, review, updated_at FROM sessions WHERE phase IN (${placeholders})`,
+        `SELECT agent_session_id, phase, issue_id, branch, plan, sandbox_id, pr_url, review, updated_at FROM sessions WHERE phase IN (${placeholders})`,
       )
       .all(...phases) as {
       agent_session_id: string;
       phase: Phase;
       issue_id: string | null;
+      branch: string | null;
       plan: string | null;
       sandbox_id: string | null;
       pr_url: string | null;
@@ -222,6 +235,7 @@ export class SessionStore {
       agentSessionId: row.agent_session_id,
       phase: row.phase,
       issueId: row.issue_id,
+      branch: row.branch,
       plan: row.plan,
       sandboxId: row.sandbox_id,
       prUrl: row.pr_url,

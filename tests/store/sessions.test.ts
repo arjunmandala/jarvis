@@ -166,3 +166,35 @@ describe("pr_url and review columns", () => {
     store.close();
   });
 });
+
+describe("branch column", () => {
+  it("defaults to null on new rows", () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_b1", "await_branch", "iss");
+    expect(store.get("as_b1")?.branch).toBeNull();
+    store.close();
+  });
+
+  it("round-trips through setBranch", () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_b2", "plan", "iss");
+    store.setBranch("as_b2", "feature/foo");
+    expect(store.get("as_b2")?.branch).toBe("feature/foo");
+    store.close();
+  });
+
+  it("setBranch on unknown id is a no-op", () => {
+    const store = new SessionStore(":memory:");
+    store.setBranch("missing", "main");
+    expect(store.get("missing")).toBeUndefined();
+    store.close();
+  });
+
+  it("lists sessions in the await_branch phase", () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_b3", "await_branch", "iss");
+    const rows = store.listByPhase("await_branch");
+    expect(rows.map((r) => r.agentSessionId)).toEqual(["as_b3"]);
+    store.close();
+  });
+});
