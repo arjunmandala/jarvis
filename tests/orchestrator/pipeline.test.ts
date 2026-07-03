@@ -423,6 +423,30 @@ describe("onCreated resume", () => {
     store.close();
   });
 
+  // An "error"-phase prior with NO workBranch is a FAILED REVISE run: its plan was
+  // never approved (onPrompted feedback → phase "plan" → revise fails → "error"),
+  // so resume must re-post it for approval, NOT auto-implement it (human gate #1).
+  it("re-approves (does not implement) an error-phase prior whose plan was never approved", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_old", "error", "iss_FR");
+    store.setPlan("as_old", "Type: chore\nScope: small\n\n## Plan\n- unapproved revise");
+    store.setBranch("as_old", "main");
+    // no setWorkBranch — implementation never started
+
+    const log: string[] = [];
+    const createSpy = vi.spyOn(Sandbox, "create").mockRejectedValue(new Error("should not create a sandbox"));
+    const orch = new Orchestrator({ targetRepo: "o/r" } as Config, store, () => fakeActs(log));
+
+    await orch.onCreated({ agentSessionId: "as_new_fr", organizationId: "o", issueId: "iss_FR", title: "T", description: "D", comment: "", promptContext: "" });
+
+    expect(createSpy).not.toHaveBeenCalled(); // never implemented
+    expect(store.get("as_new_fr")?.phase).toBe("await_approval");
+    expect(store.get("as_new_fr")?.plan).toContain("unapproved revise");
+    expect(log.some((l) => l.startsWith("elicitation:"))).toBe(true); // re-posted for approval
+    expect(store.get("as_old")?.phase).toBe("done"); // prior retired
+    store.close();
+  });
+
   // A "plan"-phase prior (interrupted revision run) is reconcile-eligible via its
   // stale sandboxId — resuming must retire it so reconcile doesn't post a stray
   // error to the dead session.

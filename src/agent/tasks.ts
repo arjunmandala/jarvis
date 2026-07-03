@@ -29,9 +29,8 @@ const CONVERSE_APPEND =
 // Shared tool guidance for every repo task. Fixed text — never fold per-run
 // content in here (prompt-cache byte-stability).
 // One permissive tool set for every repo task. Tool availability isn't the cost
-// lever (allowedTools is not enforced under bypassPermissions anyway) — resumption
-// and turn caps are. Keeping one list avoids per-task drift. mapTask stays
-// read-only on purpose (it must never edit).
+// lever — turns and resumption are. Keeping one list avoids per-task drift.
+// mapTask stays read-only on purpose (it must never edit).
 const ALL_REPO_TOOLS = [
   "Read", "Glob", "Grep", "Bash", "Edit", "Write", "Monitor",
   "WebSearch", "WebFetch", "Skill", "Agent", "mcp__serena", "mcp__jarvis__ask_user",

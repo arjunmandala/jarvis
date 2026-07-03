@@ -281,9 +281,14 @@ export class Orchestrator {
         await acts.response(`This issue already has an open PR from a previous run:\n\n${prior.prUrl}`);
         return;
       }
-      // Approved and attempted (implement/error) — resume implementation from the
-      // pushed branch, no re-plan, no re-approval.
-      if (prior.phase === "implement" || prior.phase === "error") {
+      // Approved and attempted — resume implementation from the pushed branch, no
+      // re-plan, no re-approval. `phase === "error"` alone is NOT sufficient: a
+      // failed REVISE run also lands in "error" while the plan column still holds
+      // the previous UNAPPROVED plan. `#runImplement` is the only caller of
+      // setWorkBranch, so `prior.workBranch` is the true "implementation started"
+      // discriminator — gate error-phase resume on it, or an unapproved plan would
+      // auto-implement (bypassing human gate #1).
+      if (prior.phase === "implement" || (prior.phase === "error" && prior.workBranch)) {
         retirePrior();
         this.#store.upsert(ctx.agentSessionId, "implement", ctx.issueId);
         this.#store.setPlan(ctx.agentSessionId, prior.plan);
@@ -296,7 +301,9 @@ export class Orchestrator {
       // Planned but never approved — reuse the plan, skip straight to approval.
       // A "plan"-phase prior (revision run interrupted mid-flight) carries a stale
       // sandboxId and is in reconcile's phase list — retire it like the others.
-      if (prior.phase === "await_approval" || prior.phase === "plan") {
+      // An "error"-phase prior WITHOUT a workBranch (a failed revise run) also lands
+      // here: its plan was never approved, so it must be re-approved, not implemented.
+      if (prior.phase === "await_approval" || prior.phase === "plan" || prior.phase === "error") {
         retirePrior();
         this.#store.upsert(ctx.agentSessionId, "await_approval", ctx.issueId);
         this.#store.setPlan(ctx.agentSessionId, prior.plan);
