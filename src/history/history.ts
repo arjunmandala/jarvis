@@ -73,6 +73,9 @@ export function renderHistory(thread: string | null, files: string[]): string | 
   return sections.join("\n\n");
 }
 
+// ponytail: same-issue scope only — history never crosses issues. Upgrade
+// path if scope ever widens: a host-side retrieval tool (cross-issue search),
+// not more goal injection.
 /**
  * The one-call entry point for the orchestrator: gather this issue's prior
  * sessions, fetch their visible threads, export their run logs into the

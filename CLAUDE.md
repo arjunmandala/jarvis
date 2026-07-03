@@ -181,7 +181,8 @@ standalone (no stream) to re-attach after a restart.
 
 ### Session memory (`src/history/history.ts`)
 
-Every plan/revise/implement/review run gets same-issue memory, assembled by
+Every plan/revise/implement/review run (not the implement run's automatic
+self-review, which reviews its own fresh diff) gets same-issue memory, assembled by
 `prepareHistory()` right after `cloneRepo()`: (1) the visible Linear
 conversation of every session on the issue (fetched via `makeThreadFetcher`,
 capped at 20k chars keeping the newest) is appended to the task `goal` —

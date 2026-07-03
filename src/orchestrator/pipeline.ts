@@ -537,6 +537,10 @@ export class Orchestrator {
     if (text.startsWith("PR_FAILED:")) {
       console.error(`[phase] ${agentSessionId} → error (PR creation failed: ${text.slice(0, 100)})`);
       await this.#failLoud(agentSessionId, acts, `PR could not be opened: ${text.slice("PR_FAILED:".length).trim()}`);
+    // ponytail: shape-check only — injected session history can contain an older
+    // PR URL, which a confused run could echo as its final message and have
+    // accepted as its result. Upgrade path: validate the URL against this run's
+    // workBranch/TARGET_REPO before accepting.
     } else if (result?.kind === "result" && result.text && PR_URL_RE.test(text)) {
       console.log(`[phase] ${agentSessionId} → done (PR: ${result.text.slice(0, 100)})`);
       this.#store.setPrUrl(agentSessionId, text);
