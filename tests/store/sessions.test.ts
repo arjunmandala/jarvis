@@ -236,3 +236,49 @@ describe("findResumableByIssue", () => {
     store.close();
   });
 });
+
+describe("listByIssue and getRunLogsBySession", () => {
+  it("listByIssue returns all sessions for the issue, oldest-first, and nothing else", () => {
+    const s = new SessionStore(":memory:");
+    s.upsert("as_h1", "done", "iss_h");
+    s.upsert("as_h2", "error", "iss_h");
+    s.upsert("as_other", "done", "iss_other");
+    const rows = s.listByIssue("iss_h");
+    expect(rows.map((r) => r.agentSessionId)).toEqual(["as_h1", "as_h2"]);
+    expect(s.listByIssue("iss_missing")).toEqual([]);
+    s.close();
+  });
+
+  it("getRunLogsBySession returns runs oldest-first with events joined as JSONL", () => {
+    const s = new SessionStore(":memory:");
+    s.upsert("as_h3", "implement", "iss_h3");
+    const run1 = s.createRun("as_h3", "plan", "o/r");
+    const run2 = s.createRun("as_h3", "implement", "o/r");
+    s.addRunEvent(run1, "assistant_text", { kind: "assistant_text", text: "thinking" });
+    s.addRunEvent(run2, "tool_use", { kind: "tool_use", name: "Bash", input: { command: "npm test" } });
+    s.addRunEvent(run2, "result", { kind: "result", text: "https://github.com/o/r/pull/1" });
+
+    const logs = s.getRunLogsBySession("as_h3");
+    expect(logs.map((l) => l.taskType)).toEqual(["plan", "implement"]);
+    expect(logs[0].runId).toBe(run1);
+
+    const lines = logs[1].jsonl.split("\n");
+    expect(lines).toHaveLength(2);
+    const first = JSON.parse(lines[0]);
+    expect(first.type).toBe("tool_use");
+    expect(first.payload.input.command).toBe("npm test");
+    expect(first.ts).toBeTruthy();
+    s.close();
+  });
+
+  it("getRunLogsBySession returns an empty jsonl for a run with no events, and [] for unknown sessions", () => {
+    const s = new SessionStore(":memory:");
+    s.upsert("as_h4", "plan", "iss_h4");
+    s.createRun("as_h4", "map", "o/r");
+    const logs = s.getRunLogsBySession("as_h4");
+    expect(logs).toHaveLength(1);
+    expect(logs[0].jsonl).toBe("");
+    expect(s.getRunLogsBySession("as_nope")).toEqual([]);
+    s.close();
+  });
+});

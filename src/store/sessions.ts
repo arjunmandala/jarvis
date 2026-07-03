@@ -26,6 +26,16 @@ export interface RunFinish {
   error: string | null;
 }
 
+// One prior run's telemetry, packaged for export into the sandbox as a JSONL
+// file (see src/history/history.ts). jsonl is the raw run_events stream.
+export interface RunLog {
+  runId: number;
+  taskType: string;
+  startedAt: string;
+  outcome: string | null;
+  jsonl: string;
+}
+
 export class SessionStore {
   #db: DatabaseSync;
 
@@ -290,6 +300,43 @@ export class SessionStore {
       branch: row.branch, workBranch: row.work_branch, plan: row.plan,
       sandboxId: row.sandbox_id, prUrl: row.pr_url, review: row.review, updatedAt: row.updated_at,
     };
+  }
+
+  // Session memory: every session for an issue (including the asking one),
+  // oldest-first — the source list for thread assembly and log export.
+  listByIssue(issueId: string): SessionRow[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT agent_session_id, phase, issue_id, branch, work_branch, plan, sandbox_id, pr_url, review, updated_at
+         FROM sessions WHERE issue_id = ? ORDER BY updated_at ASC`,
+      )
+      .all(issueId) as {
+      agent_session_id: string; phase: Phase; issue_id: string | null;
+      branch: string | null; work_branch: string | null; plan: string | null;
+      sandbox_id: string | null; pr_url: string | null; review: string | null; updated_at: string;
+    }[];
+    return rows.map((row) => ({
+      agentSessionId: row.agent_session_id, phase: row.phase, issueId: row.issue_id,
+      branch: row.branch, workBranch: row.work_branch, plan: row.plan,
+      sandboxId: row.sandbox_id, prUrl: row.pr_url, review: row.review, updatedAt: row.updated_at,
+    }));
+  }
+
+  // Raw event stream per run, oldest run first. payload is already a JSON
+  // string in the DB — splice it in verbatim instead of parse/re-stringify.
+  getRunLogsBySession(agentSessionId: string): RunLog[] {
+    const runs = this.#db
+      .prepare(`SELECT id, task_type, started_at, outcome FROM runs WHERE agent_session_id = ? ORDER BY id ASC`)
+      .all(agentSessionId) as { id: number; task_type: string; started_at: string; outcome: string | null }[];
+    return runs.map((r) => {
+      const events = this.#db
+        .prepare(`SELECT ts, type, payload FROM run_events WHERE run_id = ? ORDER BY id ASC`)
+        .all(r.id) as { ts: string; type: string; payload: string }[];
+      const jsonl = events
+        .map((e) => `{"ts":${JSON.stringify(e.ts)},"type":${JSON.stringify(e.type)},"payload":${e.payload}}`)
+        .join("\n");
+      return { runId: r.id, taskType: r.task_type, startedAt: r.started_at, outcome: r.outcome, jsonl };
+    });
   }
 
   close(): void {
