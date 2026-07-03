@@ -120,9 +120,16 @@ function repoMapBlock(repoMap?: string): string {
   return `\n\n---\nRepository map (pre-generated; trust it for orientation, verify before depending on details):\n${repoMap}`;
 }
 
-export function planTask(ctx: IssueContext, repoMap?: string): AgentTask {
+// Per-run content only — same cache rule as repoMapBlock. The string arrives
+// pre-rendered from src/history/history.ts (thread + grep pointer).
+function historyBlock(history?: string): string {
+  if (!history) return "";
+  return `\n\n---\nHistory — prior sessions on this issue:\n${history}`;
+}
+
+export function planTask(ctx: IssueContext, repoMap?: string, history?: string): AgentTask {
   return {
-    goal: `Produce an implementation plan for this issue.\n\n${issueBlock(ctx)}${repoMapBlock(repoMap)}`,
+    goal: `Produce an implementation plan for this issue.\n\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}`,
     cwd: REPO_DIR,
     model: "claude-sonnet-5",
     systemAppend: PLAN_APPEND,
@@ -133,14 +140,20 @@ export function planTask(ctx: IssueContext, repoMap?: string): AgentTask {
   };
 }
 
-export function reviseTask(ctx: IssueContext, previousPlan: string, feedback: string, repoMap?: string): AgentTask {
+export function reviseTask(
+  ctx: IssueContext,
+  previousPlan: string,
+  feedback: string,
+  repoMap?: string,
+  history?: string,
+): AgentTask {
   return {
     goal:
       `Revise the plan below according to the human's feedback. Apply the feedback faithfully and keep ` +
       `everything the feedback doesn't touch. Re-check the repo where the feedback changes assumptions. ` +
       `Your FINAL message must be the complete revised plan in Markdown — that text is returned verbatim to ` +
       `the human for approval.\n\n` +
-      `Feedback:\n${feedback}\n\n---\nPrevious plan:\n${previousPlan}\n\n---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}`,
+      `Feedback:\n${feedback}\n\n---\nPrevious plan:\n${previousPlan}\n\n---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}`,
     cwd: REPO_DIR,
     model: "claude-sonnet-5",
     systemAppend: PLAN_APPEND,
@@ -167,7 +180,13 @@ function routeImplement(plan: string): { model: string; effort: EffortLevel; max
     : { model: "claude-opus-4-8", effort: "high", maxBudgetUsd: 8 };
 }
 
-export function implementTask(ctx: IssueContext, approvedPlan: string, repoMap?: string, workBranch?: string): AgentTask {
+export function implementTask(
+  ctx: IssueContext,
+  approvedPlan: string,
+  repoMap?: string,
+  workBranch?: string,
+  history?: string,
+): AgentTask {
   const route = routeImplement(approvedPlan);
   const branchBlock = workBranch
     ? `Work on the branch \`${workBranch}\` and NOTHING else. First run: ` +
@@ -185,7 +204,7 @@ export function implementTask(ctx: IssueContext, approvedPlan: string, repoMap?:
       `already exist), run \`gh pr view --json url -q .url\` and make your FINAL message EXACTLY that URL ` +
       `alone — no prose, no markdown. If PR creation fails, your FINAL message must instead start with ` +
       `\`PR_FAILED:\` followed by the reason.\n\n` +
-      `${approvedPlan}\n\n---\nOriginal issue:\n${issueBlock(ctx)}${repoMapBlock(repoMap)}`,
+      `${approvedPlan}\n\n---\nOriginal issue:\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}`,
     cwd: REPO_DIR,
     model: route.model, // small/unambiguous → Sonnet 5; large or refactor → Opus 4.8
     systemAppend: IMPLEMENT_APPEND,
@@ -225,6 +244,7 @@ export function reviewTask(
   plan: string | null,
   userMessage: string | null,
   repoMap?: string,
+  history?: string,
 ): AgentTask {
   return {
     goal:
@@ -237,7 +257,7 @@ export function reviewTask(
           `ask a question, answer it; if they suggest a change, assess it; otherwise review.\n\n`
         : "") +
       (plan ? `Approved plan this diff implements:\n${plan}\n\n` : "") +
-      `---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}`,
+      `---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}`,
     cwd: REPO_DIR,
     model: "claude-sonnet-5",
     systemAppend: REVIEW_APPEND,

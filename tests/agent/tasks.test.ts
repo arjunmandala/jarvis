@@ -262,3 +262,29 @@ describe("turn caps and unified tools", () => {
     expect(p).toEqual(expect.arrayContaining(["Read", "Glob", "Grep", "Bash", "Edit", "Write", "Agent", "Skill", "mcp__serena", "mcp__jarvis__ask_user"]));
   });
 });
+
+const hctx: IssueContext = {
+  agentSessionId: "as_hist", organizationId: "org", issueId: "iss",
+  title: "t", description: "d", comment: "", promptContext: "",
+};
+const HISTORY = "Conversation from prior sessions on this issue (oldest first):\n\n**Human:** hi";
+
+describe("history injection", () => {
+  it("appends history to the goal of plan/revise/implement/review when provided", () => {
+    expect(planTask(hctx, undefined, HISTORY).goal).toContain(HISTORY);
+    expect(reviseTask(hctx, "old plan", "feedback", undefined, HISTORY).goal).toContain(HISTORY);
+    expect(implementTask(hctx, "Type: chore\nScope: small\nplan", undefined, "jarvis/iss", HISTORY).goal).toContain(HISTORY);
+    expect(reviewTask(hctx, "https://github.com/o/r/pull/1", null, null, undefined, HISTORY).goal).toContain(HISTORY);
+  });
+
+  it("omits the history section entirely when absent", () => {
+    expect(planTask(hctx).goal).not.toContain("prior sessions");
+    expect(reviewTask(hctx, "https://github.com/o/r/pull/1", null, null).goal).not.toContain("prior sessions");
+  });
+
+  it("never touches systemAppend (prompt-cache byte-stability)", () => {
+    expect(planTask(hctx, undefined, HISTORY).systemAppend).toBe(planTask(hctx).systemAppend);
+    expect(implementTask(hctx, "Type: chore\nScope: small\nplan", undefined, undefined, HISTORY).systemAppend)
+      .toBe(implementTask(hctx, "Type: chore\nScope: small\nplan").systemAppend);
+  });
+});
