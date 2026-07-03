@@ -243,10 +243,40 @@ export class Orchestrator {
     // re-plan (or redo implemented work) from scratch.
     const prior = ctx.issueId ? this.#store.findResumableByIssue(ctx.issueId, ctx.agentSessionId) : null;
     if (prior?.plan) {
-      const workBranch = prior.workBranch ?? this.#workBranchFor(ctx.issueId, ctx.agentSessionId);
-      // Already finished with a PR — point at it rather than redo the work.
-      if (prior.phase === "done" && prior.prUrl) {
+      // The prior session's run may still be executing (issue re-assigned mid-run).
+      // Starting a second run here would push concurrently to the same deterministic
+      // work branch — refuse and let the live run finish. Must run BEFORE any
+      // prior-row mutation below (retiring a live prior would break its reconcile).
+      if (this.hasLive(prior.agentSessionId)) {
+        console.log(`[phase] ${ctx.agentSessionId} prior session ${prior.agentSessionId} is still live — not starting a second run`);
         this.#store.upsert(ctx.agentSessionId, "done", ctx.issueId);
+        await acts.response(
+          "A previous run for this issue is still working — I'll let it finish rather than start a second, conflicting one. " +
+            "Re-assign the issue once it's done if you need another pass.",
+        );
+        return;
+      }
+      const workBranch = prior.workBranch ?? this.#workBranchFor(ctx.issueId, ctx.agentSessionId);
+      // Retire the (not-live) prior row so boot reconciliation ignores it: it
+      // still points at a now-stale sandboxId in a run phase, and reconcile()
+      // would otherwise re-attach to a defunct sandbox, fail, and post a stray
+      // error activity to the dead prior Linear session.
+      const retirePrior = () => {
+        this.#store.setPhase(prior.agentSessionId, "done");
+        this.#store.setSandbox(prior.agentSessionId, null);
+      };
+      // Already finished with a PR — point the new session at it rather than redo
+      // the work. `prior.prUrl` (not `phase === "done"`) is the test: the transient
+      // `review` phase also always carries a prUrl and must not fall through to a
+      // full re-plan that discards the open PR.
+      if (prior.prUrl) {
+        retirePrior();
+        this.#store.upsert(ctx.agentSessionId, "done", ctx.issueId);
+        // Copy the durable context (not just prUrl) so a later done-follow-up on
+        // the new session can review against the plan/branch, not plan=null.
+        this.#store.setPlan(ctx.agentSessionId, prior.plan);
+        if (prior.branch) this.#store.setBranch(ctx.agentSessionId, prior.branch);
+        this.#store.setWorkBranch(ctx.agentSessionId, workBranch);
         this.#store.setPrUrl(ctx.agentSessionId, prior.prUrl);
         await acts.response(`This issue already has an open PR from a previous run:\n\n${prior.prUrl}`);
         return;
@@ -254,6 +284,7 @@ export class Orchestrator {
       // Approved and attempted (implement/error) — resume implementation from the
       // pushed branch, no re-plan, no re-approval.
       if (prior.phase === "implement" || prior.phase === "error") {
+        retirePrior();
         this.#store.upsert(ctx.agentSessionId, "implement", ctx.issueId);
         this.#store.setPlan(ctx.agentSessionId, prior.plan);
         if (prior.branch) this.#store.setBranch(ctx.agentSessionId, prior.branch);

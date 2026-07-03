@@ -402,6 +402,91 @@ describe("onCreated resume", () => {
     expect(store.get("as_new2")?.plan).toContain("tweak");
     store.close();
   });
+
+  // F1: re-assigning while the prior run is still LIVE must not start a second
+  // concurrent implement run pushing to the same deterministic work branch.
+  it("does not start a second run when the prior session is still live", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_old", "implement", "iss_L");
+    store.setPlan("as_old", "Type: feature\nScope: large\n\n## Plan\n- build it");
+    store.setSandbox("as_old", "sbx-live");
+
+    const log: string[] = [];
+    const createSpy = vi.spyOn(Sandbox, "create").mockRejectedValue(new Error("should not create a sandbox"));
+    const orch = new Orchestrator({ targetRepo: "o/r" } as Config, store, () => fakeActs(log));
+    vi.spyOn(orch, "hasLive").mockImplementation((id: string) => id === "as_old");
+
+    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_L", title: "T", description: "D", comment: "", promptContext: "" });
+
+    expect(createSpy).not.toHaveBeenCalled(); // no #runImplement side effects
+    expect(log.some((l) => l.startsWith("response:"))).toBe(true); // 10s rule: an activity was posted
+    expect(store.get("as_new")?.phase).toBe("done");
+    expect(store.get("as_old")?.phase).toBe("implement"); // prior left intact for its own run/reconcile
+    store.close();
+  });
+
+  // F2: a prior in the transient "review" phase (which always carries a prUrl)
+  // must point the new session at the PR, not fall through to a full re-plan.
+  it("points a new session at the prior PR when the prior was in the transient review phase", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_old", "review", "iss_V");
+    store.setPlan("as_old", "Type: chore\nScope: small\n\n## Plan\n- x");
+    store.setPrUrl("as_old", "https://github.com/o/r/pull/9");
+    store.setSandbox("as_old", "sbx-old");
+
+    const log: string[] = [];
+    const orch = makeOrchWithFakeSandbox(store, log, {});
+    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_V", title: "T", description: "D", comment: "", promptContext: "" });
+
+    expect(log.join("\n")).not.toMatch(/drafting a plan|Reading the codebase/i); // no re-plan
+    expect(store.get("as_new")?.phase).toBe("done");
+    expect(store.get("as_new")?.prUrl).toBe("https://github.com/o/r/pull/9");
+    expect(log.some((l) => l.includes("already has an open PR"))).toBe(true);
+    store.close();
+  });
+
+  // F3: the done+prUrl resume must copy the durable context (plan, branch,
+  // workBranch), not just prUrl — a later done-follow-up needs it.
+  it("copies plan, branch and workBranch (not just prUrl) when resuming a prior PR", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_old", "done", "iss_D");
+    store.setPlan("as_old", "Type: chore\nScope: small\n\n## Plan\n- done");
+    store.setBranch("as_old", "develop");
+    store.setWorkBranch("as_old", "jarvis/iss_D");
+    store.setPrUrl("as_old", "https://github.com/o/r/pull/3");
+
+    const log: string[] = [];
+    const orch = makeOrchWithFakeSandbox(store, log, {});
+    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_D", title: "T", description: "D", comment: "", promptContext: "" });
+
+    expect(store.get("as_new")?.plan).toContain("done");
+    expect(store.get("as_new")?.branch).toBe("develop");
+    expect(store.get("as_new")?.workBranch).toBe("jarvis/iss_D");
+    expect(store.get("as_new")?.prUrl).toBe("https://github.com/o/r/pull/3");
+    store.close();
+  });
+
+  // F4: resuming implementation must retire the prior row (phase done, sandbox
+  // cleared) so boot reconcile() doesn't post a stray error to the dead session.
+  it("retires the prior row (phase done, sandbox cleared) when resuming implementation", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_old", "error", "iss_T");
+    store.setPlan("as_old", "Type: feature\nScope: large\n\n## Plan\n- build");
+    store.setBranch("as_old", "main");
+    store.setWorkBranch("as_old", "jarvis/iss_T");
+    store.setSandbox("as_old", "sbx-stale");
+
+    const log: string[] = [];
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      result: { kind: "result", subtype: "success", text: "https://github.com/o/r/pull/7", costUsd: 0.1, sessionId: "s", usage: {}, numTurns: 1 },
+    });
+    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_T", title: "T", description: "D", comment: "", promptContext: "" });
+
+    expect(store.get("as_old")?.phase).toBe("done");
+    expect(store.get("as_old")?.sandboxId).toBeNull();
+    expect(store.get("as_new")?.phase).toBe("done");
+    store.close();
+  });
 });
 
 describe("diffExceedsThreshold", () => {
