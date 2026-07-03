@@ -8,6 +8,7 @@ import { Sandbox } from "e2b";
 import { planTask, implementTask, mapTask, reviseTask, reviewTask } from "../agent/tasks.ts";
 import type { AgentTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
+import { prepareHistory, type ThreadFetcher } from "../history/history.ts";
 
 // Phase 4.1: surface the run's dollar cost inline in the Linear activity when
 // the result carries one; omitted (not "$n/a") when unknown.
@@ -84,6 +85,7 @@ export class Orchestrator {
   #store: SessionStore;
   #makeActs: (agentSessionId: string) => Activities;
   #fetchPlan?: (agentSessionId: string) => Promise<string | null>;
+  #fetchThread?: ThreadFetcher;
   #connect: (sandboxId: string) => Promise<Reconnected>;
   // Live runs: comments arriving while a run executes are injected into its
   // sandbox (steering). In-memory like the server's inflight set — a restart
@@ -100,11 +102,13 @@ export class Orchestrator {
     makeActs: (agentSessionId: string) => Activities,
     fetchPlan?: (agentSessionId: string) => Promise<string | null>,
     connect?: (sandboxId: string) => Promise<Reconnected>,
+    fetchThread?: ThreadFetcher,
   ) {
     this.#config = config;
     this.#store = store;
     this.#makeActs = makeActs;
     this.#fetchPlan = fetchPlan;
+    this.#fetchThread = fetchThread;
     // Default: a real e2b reconnect. Tests inject a fake so nothing touches e2b/network.
     this.#connect =
       connect ??
@@ -348,7 +352,8 @@ export class Orchestrator {
         }
       }
 
-      return this.#trackedRun(ctx.agentSessionId, "plan", sbx, planTask(ctx, map), acts);
+      const history = await prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread);
+      return this.#trackedRun(ctx.agentSessionId, "plan", sbx, planTask(ctx, map, history), acts);
     });
 
     if (cloneFailed) {
@@ -441,7 +446,8 @@ export class Orchestrator {
       const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
         this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
         await cloneRepo(sbx, this.#sbxCfg(), row.branch);
-        return this.#trackedRun(ctx.agentSessionId, "revise", sbx, reviseTask(ctx, plan, replyText, map), acts);
+        const history = await prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread);
+        return this.#trackedRun(ctx.agentSessionId, "revise", sbx, reviseTask(ctx, plan, replyText, map, history), acts);
       });
 
       await this.#finishPlan(ctx.agentSessionId, acts, result);
@@ -473,7 +479,8 @@ export class Orchestrator {
     const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       await cloneRepo(sbx, this.#sbxCfg(), baseBranch);
-      const r = await this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map, workBranch), acts);
+      const history = await prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread);
+      const r = await this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map, workBranch, history), acts);
       // Persist the PR URL BEFORE self-review: the review run deletes and
       // rewrites RESULT_FILE, so a restart (or stop) during self-review would
       // otherwise lose the PR — or worse, reconcile would recover the review
@@ -574,7 +581,8 @@ export class Orchestrator {
       result = await withSandbox(this.#sbxCfg(), async (sbx) => {
         this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
         await cloneRepo(sbx, this.#sbxCfg(), row.branch);
-        return this.#trackedRun(ctx.agentSessionId, "review", sbx, reviewTask(ctx, row.prUrl!, row.plan, replyText, map), acts);
+        const history = await prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread);
+        return this.#trackedRun(ctx.agentSessionId, "review", sbx, reviewTask(ctx, row.prUrl!, row.plan, replyText, map, history), acts);
       });
     } catch (err) {
       console.error(`[review] ${ctx.agentSessionId} review run failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -624,6 +632,9 @@ export class Orchestrator {
       const stat = await runCommand(sbx, `cd ${REPO_DIR} && git diff origin/HEAD... --shortstat`);
       if (stat.exitCode !== 0 || !diffExceedsThreshold(stat.stdout)) return null;
       await acts.thought("Big diff — running a self-review before handing off…");
+      // No history block here: self-review runs in the implement run's own
+      // sandbox against its own fresh diff — prior-session context adds tokens,
+      // not signal. On-demand reviews (#onDoneFollowUp) do get history.
       const r = await this.#trackedRun(ctx.agentSessionId, "review", sbx, reviewTask(ctx, prUrl, plan, null, map), acts);
       return r?.kind === "result" && r.text ? r.text : null;
     } catch (err) {

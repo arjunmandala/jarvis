@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { LinearWebhookClient } from "@linear/sdk/webhooks";
 import type { Config } from "./config.ts";
 import { SessionStore } from "./store/sessions.ts";
-import { makeLinearClient, makePlanFetcher } from "./linear/client.ts";
+import { makeLinearClient, makePlanFetcher, makeThreadFetcher } from "./linear/client.ts";
 import { makeActivities } from "./linear/activities.ts";
 import { extractContext, promptedBody } from "./linear/context.ts";
 import { Orchestrator } from "./orchestrator/pipeline.ts";
@@ -13,7 +13,14 @@ export function makeServer(config: Config): Hono {
   const linear = makeLinearClient(config.linear.accessToken);
   const webhook = new LinearWebhookClient(config.linear.webhookSecret);
   const handler = webhook.createHandler();
-  const orchestrator = new Orchestrator(config, store, (id) => makeActivities(linear, id), makePlanFetcher(config.linear.accessToken));
+  const orchestrator = new Orchestrator(
+    config,
+    store,
+    (id) => makeActivities(linear, id),
+    makePlanFetcher(config.linear.accessToken),
+    undefined, // connect: default real e2b reconnect
+    makeThreadFetcher(config.linear.accessToken),
+  );
 
   // Boot reconciliation: recover or fail-loud every session left in-flight by a
   // restart. Fire-and-forget so server startup isn't blocked on e2b.

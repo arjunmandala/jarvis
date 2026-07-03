@@ -179,6 +179,19 @@ in streaming-input mode inside the sandbox. Host and sandbox talk over three cha
 half-open stream can never hang the host. `reconcile()` reuses `watchDetached()`
 standalone (no stream) to re-attach after a restart.
 
+### Session memory (`src/history/history.ts`)
+
+Every plan/revise/implement/review run gets same-issue memory, assembled by
+`prepareHistory()` right after `cloneRepo()`: (1) the visible Linear
+conversation of every session on the issue (fetched via `makeThreadFetcher`,
+capped at 20k chars keeping the newest) is appended to the task `goal` —
+per-run content, so prompt-cache-safe; (2) the newest 10 prior runs' raw
+`run_events` streams are exported into the sandbox at
+`/home/user/jarvis-history/run-<id>-<taskType>.jsonl` and the goal tells the
+agent to Grep them on demand. Advisory end-to-end: any failure logs
+`[history]` and the run proceeds memory-less. `// ponytail:` same-issue scope
+only; upgrade path for cross-issue memory is a host-side retrieval tool.
+
 ### Agent tasks (`src/agent/tasks.ts`)
 
 Five task builders, each an `AgentTask` (goal / model / allowed tools / turn+budget
