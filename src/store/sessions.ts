@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 
-export type Phase = "clarify" | "await_branch" | "plan" | "await_approval" | "implement" | "review" | "done" | "error";
+export type Phase = "clarify" | "plan" | "await_approval" | "implement" | "review" | "done" | "error";
 
 export interface SessionRow {
   agentSessionId: string;

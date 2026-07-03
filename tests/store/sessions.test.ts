@@ -170,7 +170,7 @@ describe("pr_url and review columns", () => {
 describe("branch column", () => {
   it("defaults to null on new rows", () => {
     const store = new SessionStore(":memory:");
-    store.upsert("as_b1", "await_branch", "iss");
+    store.upsert("as_b1", "clarify", "iss");
     expect(store.get("as_b1")?.branch).toBeNull();
     store.close();
   });
@@ -190,10 +190,10 @@ describe("branch column", () => {
     store.close();
   });
 
-  it("lists sessions in the await_branch phase", () => {
+  it("lists sessions in the clarify phase", () => {
     const store = new SessionStore(":memory:");
-    store.upsert("as_b3", "await_branch", "iss");
-    const rows = store.listByPhase("await_branch");
+    store.upsert("as_b3", "clarify", "iss");
+    const rows = store.listByPhase("clarify");
     expect(rows.map((r) => r.agentSessionId)).toEqual(["as_b3"]);
     store.close();
   });

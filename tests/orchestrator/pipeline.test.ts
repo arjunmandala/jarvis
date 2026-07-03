@@ -122,47 +122,6 @@ describe("onPrompted never goes silent", () => {
   // unit test (matches the repo's convention for withSandbox/e2b paths).
 });
 
-describe("onCreated: branch resolution", () => {
-  it("asks for a branch and does not touch phase=plan when the description has none", async () => {
-    const store = new SessionStore(":memory:");
-    const log: string[] = [];
-    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
-    await orch.onCreated(ctxFor("as_br1"));
-    expect(store.get("as_br1")?.phase).toBe("await_branch");
-    expect(store.get("as_br1")?.branch).toBeNull();
-    expect(log.length).toBe(1);
-    expect(log[0]).toMatch(/^elicitation:/);
-  });
-});
-
-describe("onPrompted: await_branch", () => {
-  it("stop while awaiting a branch closes the session", async () => {
-    const store = new SessionStore(":memory:");
-    store.upsert("as_br2", "await_branch", "iss");
-    const log: string[] = [];
-    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
-    await orch.onPrompted(ctxFor("as_br2"), "stop");
-    expect(store.get("as_br2")?.phase).toBe("done");
-  });
-
-  it("an invalid branch name stays in await_branch and reports the problem", async () => {
-    const store = new SessionStore(":memory:");
-    store.upsert("as_br3", "await_branch", "iss");
-    const log: string[] = [];
-    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
-    // Note: "has space" (the brief's literal example) doesn't actually exercise
-    // this path — parseBranchAnswer extracts only the first token ("has"),
-    // which itself passes isValidBranchName, so the pipeline would proceed into
-    // #runPlan/withSandbox instead of staying in await_branch. "-flag" is a
-    // single-token reply that isValidBranchName genuinely rejects (leading
-    // char must be alnum), so it exercises the intended invalid-branch path.
-    await orch.onPrompted(ctxFor("as_br3"), "-flag");
-    expect(store.get("as_br3")?.phase).toBe("await_branch");
-    expect(store.get("as_br3")?.branch).toBeNull();
-    expect(log.some((l) => l.startsWith("error:"))).toBe(true);
-  });
-});
-
 describe("onPrompted plan recovery from Linear", () => {
   it("still errors (no sandbox call) when the plan is missing and fetchPlan returns null", async () => {
     const store = new SessionStore(":memory:");

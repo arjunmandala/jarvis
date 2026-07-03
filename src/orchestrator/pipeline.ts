@@ -39,7 +39,6 @@ export function diffExceedsThreshold(shortstat: string): boolean {
 export function nextPhase(current: Phase, approved: boolean): Phase {
   switch (current) {
     case "clarify": return "plan";
-    case "await_branch": return "plan";
     case "plan": return "await_approval";
     case "await_approval": return approved ? "implement" : "await_approval";
     case "implement": return "done";
@@ -224,30 +223,15 @@ export class Orchestrator {
     }
   }
 
-  // created: resolve the branch (description keyword, or ask) -> clarify (implicit)
-  // -> produce plan -> post as elicitation -> await approval
+  // created: clarify (implicit) -> produce plan (against the repo's default
+  // branch) -> post as elicitation -> await approval
   async onCreated(ctx: IssueContext): Promise<void> {
     const acts = this.#makeActs(ctx.agentSessionId);
-    const branch = parseBranchKeyword(`${ctx.title}\n${ctx.description}`);
-    if (branch && isValidBranchName(branch)) {
-      this.#store.upsert(ctx.agentSessionId, "plan", ctx.issueId);
-      this.#store.setBranch(ctx.agentSessionId, branch);
-      await this.#runPlan(ctx, acts, branch);
-      return;
-    }
-    console.log(`[phase] ${ctx.agentSessionId} → await_branch (no branch in the issue)`);
-    this.#store.upsert(ctx.agentSessionId, "await_branch", ctx.issueId);
-    await acts.elicitation(ASK_BRANCH);
+    this.#store.upsert(ctx.agentSessionId, "plan", ctx.issueId);
+    await this.#runPlan(ctx, acts, null);
   }
 
-  // Shared by onCreated (branch known up front) and onPrompted's await_branch
-  // resolution (branch known after a reply): clone -> one-time repo map -> plan.
-  //
-  // A clone failure here (bad/nonexistent branch) is special-cased: it bounces
-  // the session back to await_branch instead of the terminal error phase, so a
-  // typo doesn't force a full re-assign. Only this first clone gets that
-  // treatment — revise/implement clones re-use an already-validated branch, so
-  // their failures keep the existing #failLoud behavior.
+  // Called from onCreated: clone -> one-time repo map -> plan.
   async #runPlan(ctx: IssueContext, acts: Activities, branch: string | null): Promise<void> {
     console.log(`[phase] ${ctx.agentSessionId} → plan (cloning + drafting)`);
     await acts.thought("Reading the codebase to draft a plan…");
@@ -283,8 +267,7 @@ export class Orchestrator {
 
     if (cloneFailed) {
       this.#store.setSandbox(ctx.agentSessionId, null);
-      this.#store.setPhase(ctx.agentSessionId, "await_branch");
-      await acts.error(`I couldn't check out branch \`${branch}\` — it may not exist. ${ASK_BRANCH}`);
+      await this.#failLoud(ctx.agentSessionId, acts, "I couldn't clone the repository. Re-assign the issue to retry.");
       return;
     }
 
@@ -315,30 +298,6 @@ export class Orchestrator {
   async onPrompted(ctx: IssueContext, replyText: string): Promise<void> {
     const acts = this.#makeActs(ctx.agentSessionId);
     const row = this.#store.get(ctx.agentSessionId);
-
-    if (row?.phase === "await_branch") {
-      if (parseStopGate(replyText)) {
-        console.log(`[phase] ${ctx.agentSessionId} stop requested while awaiting branch — closing session`);
-        try {
-          await acts.response("Stopped. Re-assign the issue when you want me to plan again.");
-        } catch (err) {
-          console.error(`[phase] ${ctx.agentSessionId} failed to post stop activity: ${err instanceof Error ? err.message : String(err)}`);
-        } finally {
-          this.#store.setPhase(ctx.agentSessionId, "done");
-        }
-        return;
-      }
-      const branch = parseBranchAnswer(replyText);
-      if (!branch || !isValidBranchName(branch)) {
-        console.log(`[phase] ${ctx.agentSessionId} invalid branch reply — asking again`);
-        await acts.error(`"${replyText.trim().slice(0, 80)}" doesn't look like a valid branch name. ${ASK_BRANCH}`);
-        return;
-      }
-      this.#store.setBranch(ctx.agentSessionId, branch);
-      this.#store.setPhase(ctx.agentSessionId, "plan");
-      await this.#runPlan(ctx, acts, branch);
-      return;
-    }
 
     if (!row || row.phase !== "await_approval") {
       // Terminal activities only — a `thought` would leave Linear stuck on "working".
@@ -648,8 +607,4 @@ export class Orchestrator {
 import {
   parseApproval as parseApprovalGate,
   parseStop as parseStopGate,
-  parseBranchKeyword,
-  parseBranchAnswer,
-  isValidBranchName,
-  ASK_BRANCH,
 } from "../linear/context.ts";

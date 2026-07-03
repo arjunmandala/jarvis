@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractContext, promptedBody, parseApproval, parseStop, parseBranchKeyword, parseBranchAnswer, isValidBranchName } from "../../src/linear/context.ts";
+import { extractContext, promptedBody, parseApproval, parseStop, isValidBranchName } from "../../src/linear/context.ts";
 
 describe("extractContext", () => {
   it("pulls issue + comment + promptContext", () => {
@@ -77,36 +77,6 @@ describe("parseStop", () => {
   );
 });
 
-describe("parseBranchKeyword", () => {
-  it.each([
-    ["please use branch: feature/foo for this", "feature/foo"],
-    ["Branch:hotfix-123", "hotfix-123"],
-    ["work off branch: release/1.2.0, thanks", "release/1.2.0"],
-  ])("extracts the branch from %s", (text, expected) => expect(parseBranchKeyword(text)).toBe(expected));
-
-  it("returns null when no keyword is present", () => {
-    expect(parseBranchKeyword("just fix the bug please")).toBeNull();
-  });
-});
-
-describe("parseBranchAnswer", () => {
-  it("prefers the branch: keyword form", () => {
-    expect(parseBranchAnswer("branch: feature/foo")).toBe("feature/foo");
-  });
-
-  it("falls back to the first token of a bare reply", () => {
-    expect(parseBranchAnswer("feature/foo")).toBe("feature/foo");
-    expect(parseBranchAnswer("feature/foo please")).toBe("feature/foo");
-  });
-
-  it("strips trailing punctuation from a bare reply", () => {
-    expect(parseBranchAnswer("main.")).toBe("main");
-  });
-
-  it("returns null for an empty reply", () => {
-    expect(parseBranchAnswer("   ")).toBeNull();
-  });
-});
 
 describe("isValidBranchName", () => {
   it.each(["main", "feature/foo", "release-1.2.0", "hotfix_123"])(

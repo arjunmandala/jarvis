@@ -64,28 +64,6 @@ export function parseStop(text: string): boolean {
   return STOP.test(text) && !STOP_NEGATED.test(text);
 }
 
-export const ASK_BRANCH =
-  "Which branch should I work from? Reply with the branch name " +
-  '(e.g. `branch: feature/foo`), or just the name by itself.';
-
-// ponytail: keyword heuristic, same style as parseApproval/parseStop above.
-const BRANCH_KEYWORD = /\bbranch\s*:\s*(\S+)/i;
-const TRAILING_PUNCT = /[.,;:]+$/;
-
-export function parseBranchKeyword(text: string): string | null {
-  const m = BRANCH_KEYWORD.exec(text);
-  return m ? m[1].replace(TRAILING_PUNCT, "") || null : null;
-}
-
-// Used only when a reply is answering "which branch?" directly — accepts
-// either the branch: keyword or a bare branch name as the first token.
-export function parseBranchAnswer(text: string): string | null {
-  const keyword = parseBranchKeyword(text);
-  if (keyword) return keyword;
-  const first = text.trim().split(/\s+/)[0] ?? "";
-  return first.replace(TRAILING_PUNCT, "") || null;
-}
-
 // Trust boundary: this string is interpolated into `git clone -b <name> ...`
 // (see cloneRepo in src/sandbox/session.ts). Validate BEFORE storing or
 // passing it anywhere near a shell command — never after.
