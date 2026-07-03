@@ -61,3 +61,62 @@ export function makePlanFetcher(
     }
   };
 }
+
+const THREAD_QUERY = `query($id: String!) { agentSession(id: $id) { activities(first: 250) { nodes { content { __typename ... on AgentActivityPromptContent { body } ... on AgentActivityResponseContent { body } ... on AgentActivityErrorContent { body } ... on AgentActivityElicitationContent { body } } } } } }`;
+
+// Visible-thread speakers only. thought/action are telemetry noise — the raw
+// run logs exported into the sandbox cover "what did the agent actually do".
+const THREAD_LABELS: Record<string, string> = {
+  AgentActivityPromptContent: "Human",
+  AgentActivityResponseContent: "Jarvis",
+  AgentActivityErrorContent: "Jarvis (error)",
+  AgentActivityElicitationContent: "Jarvis (plan/question)",
+};
+
+interface ThreadQueryResponse {
+  data?: {
+    agentSession?: {
+      activities?: { nodes?: ElicitationNode[] } | null;
+    } | null;
+  } | null;
+  errors?: unknown;
+}
+
+/**
+ * Fetch one agent session's visible conversation from Linear as Markdown —
+ * the "session memory" thread injected into later runs on the same issue.
+ * Same failure contract as makePlanFetcher: null on any error (advisory).
+ * ponytail: first 250 activities, no pagination — a session that big has
+ * bigger problems; add cursor paging if one ever hits the cap.
+ */
+export function makeThreadFetcher(
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+): (agentSessionId: string) => Promise<string | null> {
+  return async (agentSessionId: string): Promise<string | null> => {
+    try {
+      const res = await fetchImpl("https://api.linear.app/graphql", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ query: THREAD_QUERY, variables: { id: agentSessionId } }),
+      });
+      if (!res.ok) return null;
+      const json = (await res.json()) as ThreadQueryResponse;
+      if (json.errors) return null;
+      const nodes = json.data?.agentSession?.activities?.nodes ?? [];
+      const blocks = nodes
+        .map((n) => {
+          const label = n.content?.__typename ? THREAD_LABELS[n.content.__typename] : undefined;
+          const body = n.content?.body?.trim();
+          return label && body ? `**${label}:** ${body}` : null;
+        })
+        .filter((b): b is string => b !== null);
+      return blocks.length > 0 ? blocks.join("\n\n") : null;
+    } catch {
+      return null;
+    }
+  };
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { makePlanFetcher } from "../../src/linear/client.ts";
+import { makePlanFetcher, makeThreadFetcher } from "../../src/linear/client.ts";
 import { APPROVAL_FOOTER } from "../../src/linear/context.ts";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -89,5 +89,71 @@ describe("makePlanFetcher", () => {
     });
     const fetchPlan = makePlanFetcher("token-123", fetchImpl as unknown as typeof fetch);
     expect(await fetchPlan("as_6")).toBeNull();
+  });
+});
+
+function contentNode(typename: string, body: string) {
+  return { content: { __typename: typename, body } };
+}
+
+describe("makeThreadFetcher", () => {
+  it("renders prompts and responses as a labelled Markdown thread, in order", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        data: {
+          agentSession: {
+            activities: {
+              nodes: [
+                contentNode("AgentActivityPromptContent", "please fix the login bug"),
+                contentNode("AgentActivityThoughtContent", "internal musing — must be skipped"),
+                contentNode("AgentActivityElicitationContent", "Type: bug\nScope: small\n1. fix it"),
+                contentNode("AgentActivityPromptContent", "approve"),
+                contentNode("AgentActivityErrorContent", "PR could not be opened: tests failed"),
+                contentNode("AgentActivityResponseContent", "Done. PR opened."),
+              ],
+            },
+          },
+        },
+      }),
+    );
+    const fetchThread = makeThreadFetcher("token-123", fetchImpl as unknown as typeof fetch);
+    const thread = await fetchThread("as_t1");
+    expect(thread).toBe(
+      "**Human:** please fix the login bug\n\n" +
+        "**Jarvis (plan/question):** Type: bug\nScope: small\n1. fix it\n\n" +
+        "**Human:** approve\n\n" +
+        "**Jarvis (error):** PR could not be opened: tests failed\n\n" +
+        "**Jarvis:** Done. PR opened.",
+    );
+    const call = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(call[0]).toBe("https://api.linear.app/graphql");
+    expect(JSON.parse(call[1].body as string).variables).toEqual({ id: "as_t1" });
+  });
+
+  it("returns null when the session has no renderable activities", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        data: {
+          agentSession: {
+            activities: { nodes: [contentNode("AgentActivityThoughtContent", "only noise")] },
+          },
+        },
+      }),
+    );
+    const fetchThread = makeThreadFetcher("token-123", fetchImpl as unknown as typeof fetch);
+    expect(await fetchThread("as_t2")).toBeNull();
+  });
+
+  it("returns null on HTTP failure, GraphQL errors, missing session, and thrown fetch", async () => {
+    const cases: Array<() => Promise<Response>> = [
+      async () => jsonResponse({ data: {} }, 500),
+      async () => jsonResponse({ errors: [{ message: "bad" }] }),
+      async () => jsonResponse({ data: { agentSession: null } }),
+      async () => { throw new Error("network down"); },
+    ];
+    for (const impl of cases) {
+      const fetchThread = makeThreadFetcher("token-123", vi.fn(impl) as unknown as typeof fetch);
+      expect(await fetchThread("as_t3")).toBeNull();
+    }
   });
 });
