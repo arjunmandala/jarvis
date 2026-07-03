@@ -62,6 +62,22 @@ describe("implementTask", () => {
   });
 });
 
+describe("implement work-branch durability", () => {
+  it("pins the exact work branch, pushes incrementally, and dedupes the PR", () => {
+    const t = implementTask(ctx, "Type: feature\nScope: large\n\n## Plan", undefined, "jarvis/iss_1");
+    expect(t.goal).toContain("jarvis/iss_1");
+    expect(t.goal).toMatch(/git checkout -B jarvis\/iss_1 origin\/jarvis\/iss_1/);
+    expect(t.systemAppend).toMatch(/push .* after (each|every)/i);
+    expect(t.systemAppend).toMatch(/already exists/i); // idempotent PR guidance
+    expect(t.systemAppend).toMatch(/resume|continue/i); // resume-from-branch guidance
+  });
+
+  it("omits branch plumbing when no work branch is given (back-compat)", () => {
+    const t = implementTask(ctx, "## Plan");
+    expect(t.goal).not.toMatch(/git checkout -B/);
+  });
+});
+
 describe("implement model routing (by plan Type/Scope)", () => {
   const small = "Type: feature\nScope: small\n\n## Plan\n- tweak the button";
   const large = "Type: feature\nScope: large\n\n## Plan\n- rework the dashboard";

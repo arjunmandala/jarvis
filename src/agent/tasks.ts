@@ -88,7 +88,12 @@ const IMPLEMENT_APPEND =
   "(gh already reads GH_TOKEN from the environment; no separate gh auth step is needed).\n\n" +
   "DETERMINISTIC ENDING: after `gh pr create --fill`, run `gh pr view --json url -q .url` and make your " +
   "FINAL message EXACTLY that URL — one line, no prose, no markdown. If PR creation fails, your FINAL " +
-  "message must instead start with `PR_FAILED:` followed by the reason." +
+  "message must instead start with `PR_FAILED:` followed by the reason.\n\n" +
+  "DURABILITY: you may be resuming a run that died partway. Treat the work branch as the source of truth — " +
+  "if it already has commits, read them and continue from there rather than redoing finished work. Commit " +
+  "logically-scoped changes and push the branch after each one; a push you skip is work lost if the run is interrupted. " +
+  "Before opening a PR, check whether one already exists for this branch (`gh pr view`) and reuse it instead " +
+  "of creating a duplicate.\n\n" +
   TOOLING_APPEND +
   CONVERSE_APPEND;
 
@@ -154,15 +159,24 @@ function routeImplement(plan: string): { model: string; effort: EffortLevel; max
     : { model: "claude-opus-4-8", effort: "high", maxBudgetUsd: 8 };
 }
 
-export function implementTask(ctx: IssueContext, approvedPlan: string, repoMap?: string): AgentTask {
+export function implementTask(ctx: IssueContext, approvedPlan: string, repoMap?: string, workBranch?: string): AgentTask {
   const route = routeImplement(approvedPlan);
+  const branchBlock = workBranch
+    ? `Work on the branch \`${workBranch}\` and NOTHING else. First run: ` +
+      `\`git checkout -B ${workBranch} origin/${workBranch} 2>/dev/null || git checkout -b ${workBranch}\` — ` +
+      `this resumes the branch if a previous run already pushed commits to it (build on that work, do not ` +
+      `restart from scratch), or creates it fresh otherwise. Commit and \`git push -u origin ${workBranch}\` ` +
+      `after each meaningful step so progress survives an interruption. When ready, open the PR from this ` +
+      `branch; if one already exists for it, do NOT open a second — return the existing URL.\n\n`
+    : "";
   return {
     goal:
-      `Implement the following APPROVED plan, push with \`git push origin <branch>\` (origin's URL already ` +
-      `has your credential — no gh auth needed for the push), then open a PR with \`gh pr create --fill\`. ` +
-      `After the PR is created, run \`gh pr view --json url -q .url\` and make your FINAL message EXACTLY ` +
-      `that URL alone — no prose, no markdown. If PR creation fails, your FINAL message must instead start ` +
-      `with \`PR_FAILED:\` followed by the reason.\n\n` +
+      `Implement the following APPROVED plan. ${branchBlock}` +
+      `Push with \`git push origin <branch>\` (origin's URL already has your credential — no gh auth needed ` +
+      `for the push), then open a PR with \`gh pr create --fill\`. After the PR is created (or found to ` +
+      `already exist), run \`gh pr view --json url -q .url\` and make your FINAL message EXACTLY that URL ` +
+      `alone — no prose, no markdown. If PR creation fails, your FINAL message must instead start with ` +
+      `\`PR_FAILED:\` followed by the reason.\n\n` +
       `${approvedPlan}\n\n---\nOriginal issue:\n${issueBlock(ctx)}${repoMapBlock(repoMap)}`,
     cwd: REPO_DIR,
     model: route.model, // small/unambiguous → Sonnet 5; large or refactor → Opus 4.8
