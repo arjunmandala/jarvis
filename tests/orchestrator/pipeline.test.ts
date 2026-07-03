@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { Sandbox } from "e2b";
 import { nextPhase, toolParameter, Orchestrator, recoverPlan, diffExceedsThreshold } from "../../src/orchestrator/pipeline.ts";
 import { SessionStore } from "../../src/store/sessions.ts";
 import type { Activities } from "../../src/linear/activities.ts";
@@ -330,6 +331,75 @@ describe("recoverPlan", () => {
     const result = await recoverPlan(store, "as_r6", async () => "   ");
     expect(result).toBeNull();
     expect(store.get("as_r6")?.plan).toBeFalsy();
+    store.close();
+  });
+});
+
+// Fakes the withSandbox seam by stubbing Sandbox.create (the same static both
+// pipeline.ts and sandbox/session.ts share), so nothing touches e2b. The fake
+// sandbox's RESULT_FILE (files.read) yields `opts.result`, every command returns
+// exitCode 0 (so cloneRepo/serena/git-diff all succeed with an empty, sub-threshold
+// diff → no self-review), and commands.list is empty. Mirrors the reconcile tests'
+// fake `connect`, one seam over.
+function makeOrchWithFakeSandbox(
+  store: SessionStore,
+  log: string[],
+  opts: { result?: unknown },
+): Orchestrator {
+  const resultJson = opts.result ? JSON.stringify(opts.result) : "{}";
+  const fakeSbx = {
+    sandboxId: "fake-sbx",
+    files: {
+      read: async () => resultJson,
+      write: async () => undefined,
+    },
+    commands: {
+      run: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      list: async () => [],
+    },
+    kill: async () => undefined,
+  };
+  vi.spyOn(Sandbox, "create").mockResolvedValue(fakeSbx as unknown as Sandbox);
+  return new Orchestrator({ targetRepo: "o/r" } as Config, store, () => fakeActs(log));
+}
+
+describe("onCreated resume", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("resumes implementation from a saved plan without re-planning when a prior attempt was approved", async () => {
+    const store = new SessionStore(":memory:");
+    // prior attempt died mid-implement (e.g. credit exhaustion)
+    store.upsert("as_old", "error", "iss_R");
+    store.setPlan("as_old", "Type: feature\nScope: large\n\n## Plan\n- build it");
+    store.setBranch("as_old", "main");
+    store.setWorkBranch("as_old", "jarvis/iss_R");
+
+    const log: string[] = [];
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      result: { kind: "result", subtype: "success", text: "https://github.com/o/r/pull/5", costUsd: 0.4, sessionId: "s", usage: {}, numTurns: 3 },
+    });
+
+    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_R", title: "T", description: "D", comment: "", promptContext: "" });
+
+    // it did NOT run a plan phase; it went straight to implement and finished
+    expect(log.join("\n")).not.toMatch(/drafting a plan|Reading the codebase/i);
+    expect(store.get("as_new")?.phase).toBe("done");
+    expect(store.get("as_new")?.workBranch).toBe("jarvis/iss_R"); // same deterministic branch
+    store.close();
+  });
+
+  it("re-uses a saved-but-unapproved plan for re-approval instead of re-planning", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_old", "await_approval", "iss_P");
+    store.setPlan("as_old", "Type: chore\nScope: small\n\n## Plan\n- tweak");
+    store.setBranch("as_old", "main");
+
+    const log: string[] = [];
+    const orch = makeOrchWithFakeSandbox(store, log, {});
+    await orch.onCreated({ agentSessionId: "as_new2", organizationId: "o", issueId: "iss_P", title: "T", description: "D", comment: "", promptContext: "" });
+
+    expect(store.get("as_new2")?.phase).toBe("await_approval");
+    expect(store.get("as_new2")?.plan).toContain("tweak");
     store.close();
   });
 });

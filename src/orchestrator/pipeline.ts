@@ -2,7 +2,7 @@ import type { Config } from "../config.ts";
 import type { SessionStore, Phase, SessionRow } from "../store/sessions.ts";
 import type { Activities } from "../linear/activities.ts";
 import type { IssueContext } from "../linear/context.ts";
-import { APPROVAL_FOOTER } from "../linear/context.ts";
+import { APPROVAL_FOOTER, isValidBranchName } from "../linear/context.ts";
 import { withSandbox, cloneRepo, runAgent, watchDetached, injectMessage, runCommand, REPO_DIR, type AgentSandbox } from "../sandbox/session.ts";
 import { Sandbox } from "e2b";
 import { planTask, implementTask, mapTask, reviseTask, reviewTask } from "../agent/tasks.ts";
@@ -118,6 +118,16 @@ export class Orchestrator {
     };
   }
 
+  // Deterministic per-issue work branch so a resumed run finds the pushed commits.
+  // ponytail: slug of the Linear issue id; falls back to the session id if the
+  // issue id is missing or produces an invalid ref. Upgrade to the human-readable
+  // issue identifier (ENG-123) if the webhook payload ever carries it.
+  #workBranchFor(issueId: string | null, agentSessionId: string): string {
+    const seed = (issueId ?? agentSessionId).replace(/[^A-Za-z0-9._-]/g, "-").replace(/^-+|-+$/g, "");
+    const candidate = `jarvis/${seed || agentSessionId}`;
+    return isValidBranchName(candidate) ? candidate : `jarvis/${agentSessionId}`;
+  }
+
   #record(runId: number | null, e: JarvisEvent): void {
     if (runId == null) return;
     try {
@@ -227,6 +237,41 @@ export class Orchestrator {
   // branch) -> post as elicitation -> await approval
   async onCreated(ctx: IssueContext): Promise<void> {
     const acts = this.#makeActs(ctx.agentSessionId);
+
+    // Re-assigning an issue mints a NEW agentSessionId. Recover durable state from
+    // the latest prior session for this issue that saved a plan, so we don't
+    // re-plan (or redo implemented work) from scratch.
+    const prior = ctx.issueId ? this.#store.findResumableByIssue(ctx.issueId, ctx.agentSessionId) : null;
+    if (prior?.plan) {
+      const workBranch = prior.workBranch ?? this.#workBranchFor(ctx.issueId, ctx.agentSessionId);
+      // Already finished with a PR — point at it rather than redo the work.
+      if (prior.phase === "done" && prior.prUrl) {
+        this.#store.upsert(ctx.agentSessionId, "done", ctx.issueId);
+        this.#store.setPrUrl(ctx.agentSessionId, prior.prUrl);
+        await acts.response(`This issue already has an open PR from a previous run:\n\n${prior.prUrl}`);
+        return;
+      }
+      // Approved and attempted (implement/error) — resume implementation from the
+      // pushed branch, no re-plan, no re-approval.
+      if (prior.phase === "implement" || prior.phase === "error") {
+        this.#store.upsert(ctx.agentSessionId, "implement", ctx.issueId);
+        this.#store.setPlan(ctx.agentSessionId, prior.plan);
+        if (prior.branch) this.#store.setBranch(ctx.agentSessionId, prior.branch);
+        this.#store.setWorkBranch(ctx.agentSessionId, workBranch);
+        await acts.thought("Picking up where the previous run left off — resuming from the saved plan and pushed commits…");
+        await this.#runImplement(ctx, acts, prior.plan, prior.branch, workBranch);
+        return;
+      }
+      // Planned but never approved — reuse the plan, skip straight to approval.
+      if (prior.phase === "await_approval" || prior.phase === "plan") {
+        this.#store.upsert(ctx.agentSessionId, "await_approval", ctx.issueId);
+        this.#store.setPlan(ctx.agentSessionId, prior.plan);
+        if (prior.branch) this.#store.setBranch(ctx.agentSessionId, prior.branch);
+        await acts.elicitation(`${prior.plan}${APPROVAL_FOOTER}`);
+        return;
+      }
+    }
+
     this.#store.upsert(ctx.agentSessionId, "plan", ctx.issueId);
     await this.#runPlan(ctx, acts, null);
   }
@@ -362,16 +407,32 @@ export class Orchestrator {
       return;
     }
 
-    this.#store.setPhase(ctx.agentSessionId, "implement");
-    console.log(`[phase] ${ctx.agentSessionId} → implement (approved)`);
     await acts.thought("Approved — implementing in a sandbox now.");
+    await this.#runImplement(ctx, acts, plan, row.branch, this.#workBranchFor(ctx.issueId, ctx.agentSessionId));
+    return;
+  }
+
+  // Clone the base branch, run implement against the pinned work branch, self-review,
+  // finish. Shared by onPrompted (fresh approval) and onCreated (resume). Preserves
+  // the approved-path semantics verbatim — the only additions are pinning the work
+  // branch (setWorkBranch) and threading it into implementTask.
+  async #runImplement(
+    ctx: IssueContext,
+    acts: Activities,
+    plan: string,
+    baseBranch: string | null,
+    workBranch: string,
+  ): Promise<void> {
+    this.#store.setPhase(ctx.agentSessionId, "implement");
+    this.#store.setWorkBranch(ctx.agentSessionId, workBranch);
+    console.log(`[phase] ${ctx.agentSessionId} → implement (branch ${workBranch})`);
 
     const map = this.#store.getRepoMap(this.#config.targetRepo);
     let review: string | null = null;
     const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
-      await cloneRepo(sbx, this.#sbxCfg(), row.branch);
-      const r = await this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map), acts);
+      await cloneRepo(sbx, this.#sbxCfg(), baseBranch);
+      const r = await this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map, workBranch), acts);
       // Persist the PR URL BEFORE self-review: the review run deletes and
       // rewrites RESULT_FILE, so a restart (or stop) during self-review would
       // otherwise lose the PR — or worse, reconcile would recover the review
