@@ -39,6 +39,7 @@ export function diffExceedsThreshold(shortstat: string): boolean {
 export function nextPhase(current: Phase, approved: boolean): Phase {
   switch (current) {
     case "clarify": return "plan";
+    case "await_branch": return "plan";
     case "plan": return "await_approval";
     case "await_approval": return approved ? "implement" : "await_approval";
     case "implement": return "done";
@@ -222,16 +223,44 @@ export class Orchestrator {
     }
   }
 
-  // created: clarify (implicit) -> produce plan -> post as elicitation -> await approval
+  // created: resolve the branch (description keyword, or ask) -> clarify (implicit)
+  // -> produce plan -> post as elicitation -> await approval
   async onCreated(ctx: IssueContext): Promise<void> {
     const acts = this.#makeActs(ctx.agentSessionId);
-    this.#store.upsert(ctx.agentSessionId, "plan", ctx.issueId);
+    const branch = parseBranchKeyword(`${ctx.title}\n${ctx.description}`);
+    if (branch && isValidBranchName(branch)) {
+      this.#store.upsert(ctx.agentSessionId, "plan", ctx.issueId);
+      this.#store.setBranch(ctx.agentSessionId, branch);
+      await this.#runPlan(ctx, acts, branch);
+      return;
+    }
+    console.log(`[phase] ${ctx.agentSessionId} → await_branch (no branch in the issue)`);
+    this.#store.upsert(ctx.agentSessionId, "await_branch", ctx.issueId);
+    await acts.elicitation(ASK_BRANCH);
+  }
+
+  // Shared by onCreated (branch known up front) and onPrompted's await_branch
+  // resolution (branch known after a reply): clone -> one-time repo map -> plan.
+  //
+  // A clone failure here (bad/nonexistent branch) is special-cased: it bounces
+  // the session back to await_branch instead of the terminal error phase, so a
+  // typo doesn't force a full re-assign. Only this first clone gets that
+  // treatment — revise/implement clones re-use an already-validated branch, so
+  // their failures keep the existing #failLoud behavior.
+  async #runPlan(ctx: IssueContext, acts: Activities, branch: string | null): Promise<void> {
     console.log(`[phase] ${ctx.agentSessionId} → plan (cloning + drafting)`);
     await acts.thought("Reading the codebase to draft a plan…");
 
+    let cloneFailed = false;
     const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
-      await cloneRepo(sbx, this.#sbxCfg());
+      try {
+        await cloneRepo(sbx, this.#sbxCfg(), branch);
+      } catch (err) {
+        cloneFailed = true;
+        console.error(`[phase] ${ctx.agentSessionId} clone failed for branch ${branch ?? "(default)"}: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
 
       let map = this.#store.getRepoMap(this.#config.targetRepo);
       if (!map) {
@@ -250,6 +279,13 @@ export class Orchestrator {
 
       return this.#trackedRun(ctx.agentSessionId, "plan", sbx, planTask(ctx, map), acts);
     });
+
+    if (cloneFailed) {
+      this.#store.setSandbox(ctx.agentSessionId, null);
+      this.#store.setPhase(ctx.agentSessionId, "await_branch");
+      await acts.error(`I couldn't check out branch \`${branch}\` — it may not exist. ${ASK_BRANCH}`);
+      return;
+    }
 
     await this.#finishPlan(ctx.agentSessionId, acts, result);
   }
@@ -278,6 +314,31 @@ export class Orchestrator {
   async onPrompted(ctx: IssueContext, replyText: string): Promise<void> {
     const acts = this.#makeActs(ctx.agentSessionId);
     const row = this.#store.get(ctx.agentSessionId);
+
+    if (row?.phase === "await_branch") {
+      if (parseStopGate(replyText)) {
+        console.log(`[phase] ${ctx.agentSessionId} stop requested while awaiting branch — closing session`);
+        try {
+          await acts.response("Stopped. Re-assign the issue when you want me to plan again.");
+        } catch (err) {
+          console.error(`[phase] ${ctx.agentSessionId} failed to post stop activity: ${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+          this.#store.setPhase(ctx.agentSessionId, "done");
+        }
+        return;
+      }
+      const branch = parseBranchAnswer(replyText);
+      if (!branch || !isValidBranchName(branch)) {
+        console.log(`[phase] ${ctx.agentSessionId} invalid branch reply — asking again`);
+        await acts.error(`"${replyText.trim().slice(0, 80)}" doesn't look like a valid branch name. ${ASK_BRANCH}`);
+        return;
+      }
+      this.#store.setBranch(ctx.agentSessionId, branch);
+      this.#store.setPhase(ctx.agentSessionId, "plan");
+      await this.#runPlan(ctx, acts, branch);
+      return;
+    }
+
     if (!row || row.phase !== "await_approval") {
       // Terminal activities only — a `thought` would leave Linear stuck on "working".
       const phase = row?.phase ?? "unknown";
@@ -333,7 +394,7 @@ export class Orchestrator {
       const map = this.#store.getRepoMap(this.#config.targetRepo);
       const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
         this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
-        await cloneRepo(sbx, this.#sbxCfg());
+        await cloneRepo(sbx, this.#sbxCfg(), row.branch);
         return this.#trackedRun(ctx.agentSessionId, "revise", sbx, reviseTask(ctx, plan, replyText, map), acts);
       });
 
@@ -349,7 +410,7 @@ export class Orchestrator {
     let review: string | null = null;
     const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
-      await cloneRepo(sbx, this.#sbxCfg());
+      await cloneRepo(sbx, this.#sbxCfg(), row.branch);
       const r = await this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map), acts);
       // Persist the PR URL BEFORE self-review: the review run deletes and
       // rewrites RESULT_FILE, so a restart (or stop) during self-review would
@@ -450,7 +511,7 @@ export class Orchestrator {
     try {
       result = await withSandbox(this.#sbxCfg(), async (sbx) => {
         this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
-        await cloneRepo(sbx, this.#sbxCfg());
+        await cloneRepo(sbx, this.#sbxCfg(), row.branch);
         return this.#trackedRun(ctx.agentSessionId, "review", sbx, reviewTask(ctx, row.prUrl!, row.plan, replyText, map), acts);
       });
     } catch (err) {
@@ -583,4 +644,11 @@ export class Orchestrator {
 }
 
 // re-export from context to avoid a circular import in tests
-import { parseApproval as parseApprovalGate, parseStop as parseStopGate } from "../linear/context.ts";
+import {
+  parseApproval as parseApprovalGate,
+  parseStop as parseStopGate,
+  parseBranchKeyword,
+  parseBranchAnswer,
+  isValidBranchName,
+  ASK_BRANCH,
+} from "../linear/context.ts";
