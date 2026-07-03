@@ -43,7 +43,16 @@ export function makeServer(config: Config): Hono {
         return;
       }
       inflight.add(ctx.agentSessionId);
-      await acts.thought("On it — taking a look."); // 10s rule
+      try {
+        await acts.thought("On it — taking a look."); // 10s rule
+      } catch (e) {
+        // Unguarded, this rejection propagates into the Linear webhook SDK's
+        // Promise.all and gets swallowed into an unexplained 500 (no log at
+        // all) — catch here so a broken token/API call fails loud instead.
+        console.error(`[error] thought() ${ctx.agentSessionId}:`, e instanceof Error ? e.message : e);
+        inflight.delete(ctx.agentSessionId);
+        return;
+      }
       store.upsert(ctx.agentSessionId, "clarify", ctx.issueId);
       void orchestrator
         .onCreated(ctx)

@@ -1,5 +1,5 @@
 import "../src/logger.ts";
-import { Template } from "e2b";
+import { Template, defaultBuildLogger } from "e2b";
 import { join } from "node:path";
 
 // Build with: node --env-file-if-exists=.env e2b/build-template.ts
@@ -21,7 +21,14 @@ const template = Template({ fileContextPath: join(import.meta.dirname, "..") })
   .aptInstall(["gh"])
   // uv + serena (semantic code retrieval MCP server, started by runner.mjs)
   .runCmd("curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh")
-  .runCmd("env UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install -p 3.13 serena-agent")
+  // ponytail: uv's default UV_PYTHON_INSTALL_DIR lands under /root, which the
+  // sandbox's unprivileged "user" can't traverse (bad interpreter: Permission
+  // denied). Pin it under /opt and open perms so `user` can exec it.
+  .runCmd(
+    "env UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin " +
+      "UV_PYTHON_INSTALL_DIR=/opt/uv-tools/python uv tool install -p 3.13 serena-agent && " +
+      "chmod -R a+rX /opt/uv-tools",
+  )
   // In-sandbox Agent SDK + runner under /opt/jarvis-agent
   .makeDir("/opt/jarvis-agent")
   .runCmd("cd /opt/jarvis-agent && npm init -y && npm i @anthropic-ai/claude-agent-sdk@^0.3.197 zod@^4")
@@ -40,12 +47,19 @@ const template = Template({ fileContextPath: join(import.meta.dirname, "..") })
     "mkdir -p /tmp/warm/ts /tmp/warm/py && " +
       "printf '{\"compilerOptions\":{}}' > /tmp/warm/ts/tsconfig.json && " +
       "printf 'export const x = 1;\\n' > /tmp/warm/ts/index.ts && " +
-      "(serena project index /tmp/warm/ts || true)",
+      // ponytail: newer serena prompts "Enable <lang>? [y/N]" on stdin during
+      // project auto-creation; the builder has no TTY, so pipe "n" to decline
+      // every prompt. Upgrade to a serena non-interactive flag if one lands.
+      "(yes n | serena project index /tmp/warm/ts || true)",
   )
-  .runCmd("printf 'x = 1\\n' > /tmp/warm/py/main.py && (serena project index /tmp/warm/py || true)");
+  .runCmd("printf 'x = 1\\n' > /tmp/warm/py/main.py && (yes n | serena project index /tmp/warm/py || true)");
 
 try {
-  await Template.build(template, "jarvis-agent", { cpuCount: 2, memoryMB: 4096 });
+  await Template.build(template, "jarvis-agent", {
+    cpuCount: 2,
+    memoryMB: 4096,
+    onBuildLogs: defaultBuildLogger({ minLevel: "debug" }),
+  });
   console.log("Built template: jarvis-agent");
 } catch (e) {
   console.error(`Template build failed: ${e instanceof Error ? e.message : String(e)}`);
