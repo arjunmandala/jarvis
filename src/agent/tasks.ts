@@ -138,7 +138,7 @@ export function implementTask(ctx: IssueContext, approvedPlan: string, repoMap?:
     cwd: REPO_DIR,
     model: "claude-opus-4-8", // hard task
     systemAppend: IMPLEMENT_APPEND,
-    allowedTools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "WebSearch", "WebFetch", "Skill", "Agent", "mcp__serena", "mcp__jarvis__ask_user"],
+    allowedTools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "Monitor", "WebSearch", "WebFetch", "Skill", "Agent", "mcp__serena", "mcp__jarvis__ask_user"],
     maxTurns: 200,
     maxBudgetUsd: 8,
   };
