@@ -121,6 +121,18 @@ restart loses nothing except live-steering ability for runs that were mid-flight
 (`#live` is in-memory) — `reconcile()` picks those back up from `sandboxId` +
 `/tmp/jarvis-result.json`.
 
+Re-assigning an issue mints a **new** `agentSessionId`, so `onCreated` starts by
+calling `findResumableByIssue(issueId, excludeSessionId)` to look up the latest
+not-live prior session for the same issue and, if found, skips straight past
+planning instead of starting over: prior with a `prUrl` (done, or the transient
+`review` phase) → point the new session at the existing PR; prior `implement`/
+`error` → `implement` again, resuming from the saved plan and the prior's pushed
+work branch (no re-plan, no re-approval); prior `await_approval`/`plan` → reuse
+the saved plan and re-post it for approval. A prior that's still live refuses the
+new run outright rather than racing it. Every resumed-from prior is retired
+(phase forced to `done`, `sandboxId` cleared) so `reconcile()` doesn't also try
+to re-attach to its now-stale sandbox.
+
 ### Where code executes: one E2B sandbox per session
 
 The target repo is cloned fresh into a new sandbox for **each** phase transition
@@ -132,6 +144,15 @@ tool-output-driven failure feedback instead of special plumbing.
 
 `// ponytail:` one sandbox per session, recreated each run — no pooling/warm sandboxes.
 Add only if spin-up latency measurably hurts.
+
+Durable state is keyed by **issue**, not by session: `sessions.workBranch` pins a
+deterministic `jarvis/<issueId>` branch (`#workBranchFor`), and `implementTask()`
+checks it out with `git checkout -B <workBranch> origin/<workBranch> || git checkout
+-b <workBranch>`, pushing after each meaningful step (and de-duping an already-open
+PR) instead of pushing once at the end. Combined with `findResumableByIssue`, a run
+that dies mid-implementation — sandbox killed, host restarted, whatever — resumes on
+the next `created` webhook from the saved plan plus whatever was already pushed,
+rather than re-planning or redoing finished work.
 
 Serena MCP (`ide-assistant` context) is registered by `runner.mjs` when
 `/usr/local/bin/serena` exists in the sandbox, and `indexRepo()` runs once right
@@ -161,18 +182,20 @@ standalone (no stream) to re-attach after a restart.
 ### Agent tasks (`src/agent/tasks.ts`)
 
 Five task builders, each an `AgentTask` (goal / model / allowed tools / turn+budget
-caps) fed to `runner.mjs`. `planTask()`/`reviseTask()` now also carry Bash (their
-own, read-mostly use — e.g. running tests to sanity-check the plan) plus
-WebSearch/WebFetch and `mcp__serena`; `implementTask()` gains WebSearch/WebFetch
-and `mcp__serena` on top of its existing tools:
+caps) fed to `runner.mjs`. `mapTask()` is deliberately the odd one out (Read/Glob/Grep
+only — one-time, read-only repo survey); every other task shares the same
+`ALL_REPO_TOOLS` list (Read/Glob/Grep/Bash/Edit/Write/Monitor/WebSearch/WebFetch/
+`mcp__serena`/Skill/Agent/ask_user) so the agent never hits a tool wall mid-task — the
+difference between plan/revise/review/implement is the goal text, model, and turn
+cap, not the tool list:
 
-| Task | Model | Tools | Purpose |
+| Task | Model | Max turns | Purpose |
 |---|---|---|---|
-| `mapTask()` | sonnet-5 | Read/Glob/Grep | one-time per repo, cached in `repo_maps` table, injected into all later tasks for that repo |
-| `planTask()` | sonnet-5 | Read/Glob/Grep/Bash/web/serena/Skill/ask_user | read-only; final message = the plan (returned verbatim to the human) |
-| `reviseTask()` | sonnet-5 | same as plan | plan + human feedback → revised plan |
-| `implementTask()` | sonnet-5 **or** opus-4-8 (routed) | + Edit/Write/Bash/web/serena/Skill/Agent | approved plan → code, tests, push, `gh pr create`; final message must be exactly the PR URL, or `PR_FAILED: <reason>` |
-| `reviewTask()` | sonnet-5 | Read/Glob/Grep/Bash/web/serena/Skill/ask_user | self-review of big diffs + on-demand PR review; final message = the report |
+| `mapTask()` | sonnet-5 | 20 | one-time per repo, cached in `repo_maps` table, injected into all later tasks for that repo |
+| `planTask()` | sonnet-5 | 25 | read-only in practice; final message = the plan (returned verbatim to the human) |
+| `reviseTask()` | sonnet-5 | 25 | plan + human feedback → revised plan |
+| `implementTask()` | sonnet-5 **or** opus-4-8 (routed) | 120 | approved plan → code, tests, push, `gh pr create`; final message must be exactly the PR URL, or `PR_FAILED: <reason>`. Takes an optional `workBranch`: when set (a resumed run), it pins that branch (`git checkout -B <workBranch> origin/<workBranch> \|\| git checkout -b <workBranch>`) instead of branching fresh, and pushes after each meaningful step rather than once at the end, so a mid-run death leaves recoverable work on the remote |
+| `reviewTask()` | sonnet-5 | 40 | self-review of big diffs + on-demand PR review; final message = the report |
 
 Each task also carries an `effort` hint (`map`=low, `plan`/`revise`/`review`=medium,
 `implement`=high) — the Agent SDK default is `high`; lowering it on bounded tasks cuts
