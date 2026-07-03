@@ -108,11 +108,11 @@ Linear issue assigned to Jarvis
 ### Phase state machine (`src/store/sessions.ts` `Phase`)
 
 ```
-clarify → plan → await_approval ⇄ plan (revision loop, feedback ≠ approve)
-                       │
-                       └─ approve → implement → done
-                                         │
-                                         └─ failure → error
+clarify → await_branch (if no branch in the issue) → plan → await_approval ⇄ plan (revision loop, feedback ≠ approve)
+                                                                  │
+                                                                  └─ approve → implement → done
+                                                                                    │
+                                                                                    └─ failure → error
 
 done ⇄ review (reply on a finished session with a PR — report-only, always returns to done)
 ```
