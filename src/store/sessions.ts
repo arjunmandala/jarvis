@@ -265,6 +265,33 @@ export class SessionStore {
     }));
   }
 
+  // The resume seam. Re-assigning an issue mints a NEW agentSessionId, so durable
+  // state must be recoverable by issue, not by session id. Returns the latest
+  // OTHER session for this issue that got far enough to save a plan.
+  findResumableByIssue(issueId: string, excludeSessionId: string): SessionRow | null {
+    const row = this.#db
+      .prepare(
+        `SELECT agent_session_id, phase, issue_id, branch, work_branch, plan, sandbox_id, pr_url, review, updated_at
+         FROM sessions
+         WHERE issue_id = ? AND agent_session_id != ?
+           AND plan IS NOT NULL AND TRIM(plan) != ''
+         ORDER BY updated_at DESC LIMIT 1`,
+      )
+      .get(issueId, excludeSessionId) as
+      | {
+          agent_session_id: string; phase: Phase; issue_id: string | null;
+          branch: string | null; work_branch: string | null; plan: string | null;
+          sandbox_id: string | null; pr_url: string | null; review: string | null; updated_at: string;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      agentSessionId: row.agent_session_id, phase: row.phase, issueId: row.issue_id,
+      branch: row.branch, workBranch: row.work_branch, plan: row.plan,
+      sandboxId: row.sandbox_id, prUrl: row.pr_url, review: row.review, updatedAt: row.updated_at,
+    };
+  }
+
   close(): void {
     this.#db.close();
   }

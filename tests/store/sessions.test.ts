@@ -209,3 +209,30 @@ describe("work branch", () => {
     store.close();
   });
 });
+
+describe("findResumableByIssue", () => {
+  it("returns the latest prior session with a plan for the issue, excluding the current one", () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_old", "error", "iss_42");
+    store.setPlan("as_old", "## Plan\n- do it");
+    store.setBranch("as_old", "main");
+    store.setWorkBranch("as_old", "jarvis/iss_42");
+    store.upsert("as_new", "clarify", "iss_42"); // the freshly-created session
+
+    const found = store.findResumableByIssue("iss_42", "as_new");
+    expect(found?.agentSessionId).toBe("as_old");
+    expect(found?.plan).toContain("do it");
+    expect(found?.workBranch).toBe("jarvis/iss_42");
+
+    expect(store.findResumableByIssue("iss_99", "as_new")).toBeNull(); // different issue
+    store.close();
+  });
+
+  it("ignores prior sessions that never produced a plan", () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_a", "clarify", "iss_7"); // no plan
+    store.upsert("as_b", "clarify", "iss_7");
+    expect(store.findResumableByIssue("iss_7", "as_b")).toBeNull();
+    store.close();
+  });
+});
