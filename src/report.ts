@@ -1,102 +1,128 @@
-// Failure-pattern report over run telemetry. Usage: npm run report
+// Failure-pattern + economics report over run telemetry. Usage: npm run report
+// Prints the console summary AND writes a self-contained HTML dashboard
+// (jarvis-report.html — gitignored).
 import "./logger.ts";
 import { DatabaseSync } from "node:sqlite";
+import { writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import {
+  gatherReport, percentile, cacheHitRate, approvalDwellsMs, createdToPrMs,
+  type ReportData,
+} from "./report/data.ts";
+import { renderHtml } from "./report/html.ts";
 
 const db = new DatabaseSync(process.env.JARVIS_DB ?? "jarvis.db", { readOnly: true });
-
-console.log("=== Runs by task type and outcome ===");
-const outcomes = db
-  .prepare(
-    `SELECT task_type, COALESCE(outcome, '(interrupted)') AS outcome, COUNT(*) AS n,
-            ROUND(SUM(COALESCE(cost_usd, 0)), 4) AS cost
-     FROM runs GROUP BY task_type, outcome ORDER BY n DESC`,
-  )
-  .all() as { task_type: string; outcome: string; n: number; cost: number }[];
-for (const r of outcomes) console.log(`  ${r.task_type} / ${r.outcome}: ${r.n} runs ($${r.cost})`);
-
-console.log("\n=== Cost economics (by task type) ===");
-// cost_usd is the only cumulative-truthful figure Claude Code returns; tokens are
-// now summed across turns in the runner. cache_write ≫ cache_read means the prompt
-// cache keeps missing (re-writing the whole prefix at the 1.25x write premium) —
-// the lever there is fewer/faster turns and a smaller prefix, not the model.
-// tokens_cache_write is added by a migration that only runs when the server
-// (SessionStore) starts; a read-only report against a not-yet-migrated DB must
-// tolerate its absence.
-const hasCacheWrite = (db.prepare(`SELECT name FROM pragma_table_info('runs')`).all() as { name: string }[]).some(
-  (c) => c.name === "tokens_cache_write",
-);
-const cwExpr = hasCacheWrite ? "SUM(COALESCE(tokens_cache_write, 0))" : "0";
-const econ = db
-  .prepare(
-    `SELECT task_type,
-            COUNT(*) AS n,
-            ROUND(SUM(COALESCE(cost_usd, 0)), 4) AS cost,
-            ROUND(AVG(COALESCE(cost_usd, 0)), 4) AS cost_avg,
-            ROUND(AVG(COALESCE(num_turns, 0)), 1) AS turns_avg,
-            SUM(COALESCE(tokens_out, 0)) AS out,
-            SUM(COALESCE(tokens_cache_read, 0)) AS cr,
-            ${cwExpr} AS cw
-     FROM runs WHERE cost_usd IS NOT NULL
-     GROUP BY task_type ORDER BY cost DESC`,
-  )
-  .all() as { task_type: string; n: number; cost: number; cost_avg: number; turns_avg: number; out: number; cr: number; cw: number }[];
-if (econ.length === 0) {
-  console.log("  (no completed runs with cost recorded)");
-} else {
-  console.log("  task          runs   $total   $/run  turns/run    out_tok  cache_read  cache_write");
-  let totalCost = 0;
-  for (const r of econ) {
-    totalCost += r.cost;
-    console.log(
-      `  ${r.task_type.padEnd(12)} ${String(r.n).padStart(4)}  ${("$" + r.cost.toFixed(4)).padStart(8)} ` +
-        `${("$" + r.cost_avg.toFixed(4)).padStart(7)} ${String(r.turns_avg).padStart(9)}  ` +
-        `${String(r.out).padStart(9)}  ${String(r.cr).padStart(10)}  ${String(r.cw).padStart(11)}`,
-    );
-  }
-  console.log(`  total spend: $${totalCost.toFixed(4)}`);
-  const cr = econ.reduce((s, r) => s + r.cr, 0);
-  const cw = econ.reduce((s, r) => s + r.cw, 0);
-  if (cr + cw > 0) {
-    console.log(
-      `  cache write/read ratio: ${(cw / Math.max(cr, 1)).toFixed(2)} ` +
-        `(high ⇒ prompt-cache misses — trim the prefix / keep turns under the 5-min TTL)`,
-    );
-  }
-}
-
-console.log("\n=== Failed tool results, grouped (top 30) ===");
-const rows = db.prepare(`SELECT payload FROM run_events WHERE type = 'tool_result'`).all() as { payload: string }[];
-const counts = new Map<string, number>();
-for (const { payload } of rows) {
-  try {
-    const p = JSON.parse(payload) as { tool?: string | null; isError?: boolean; content?: string };
-    if (!p.isError) continue;
-    const firstLine = String(p.content ?? "").split("\n").find((l) => l.trim()) ?? "";
-    const key = `${p.tool ?? "?"}: ${firstLine.slice(0, 120)}`;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  } catch {
-    // unparseable payload — skip
-  }
-}
-const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 30);
-if (top.length === 0) console.log("  (none recorded)");
-for (const [key, n] of top) console.log(`  ${String(n).padStart(4)}×  ${key}`);
-
-console.log("\n=== Non-success runs (latest 10, last 3 events each) ===");
-const errs = db
-  .prepare(
-    `SELECT id, task_type, outcome, error FROM runs
-     WHERE outcome IS NOT NULL AND outcome != 'success'
-     ORDER BY id DESC LIMIT 10`,
-  )
-  .all() as { id: number; task_type: string; outcome: string; error: string | null }[];
-if (errs.length === 0) console.log("  (none)");
-for (const r of errs) {
-  console.log(`  run ${r.id} [${r.task_type}] ${r.outcome}${r.error ? ` — ${r.error.slice(0, 120)}` : ""}`);
-  const evs = db
-    .prepare(`SELECT ts, type, payload FROM run_events WHERE run_id = ? ORDER BY id DESC LIMIT 3`)
-    .all(r.id) as { ts: string; type: string; payload: string }[];
-  for (const e of evs.reverse()) console.log(`     ${e.ts} ${e.type} ${e.payload.slice(0, 140)}`);
-}
-
+const data = gatherReport(db);
 db.close();
+
+printConsole(data);
+
+const htmlPath = resolve("jarvis-report.html");
+writeFileSync(htmlPath, renderHtml(data));
+console.log(`\nHTML dashboard: file://${htmlPath.replace(/\\/g, "/")}`);
+
+function fmtDur(ms: number | null): string {
+  if (ms == null) return "n/a";
+  if (ms >= 3_600_000) return `${(ms / 3_600_000).toFixed(1)}h`;
+  if (ms >= 60_000) return `${(ms / 60_000).toFixed(1)}m`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function fmtRate(rate: number | null): string {
+  return rate == null ? "n/a" : `${Math.round(rate * 100)}%`;
+}
+
+function printConsole(d: ReportData): void {
+  console.log("=== Runs by task type and outcome ===");
+  const byOutcome = new Map<string, { n: number; cost: number }>();
+  for (const r of d.runs) {
+    const key = `${r.taskType} / ${r.outcome ?? "(open)"}`;
+    const cur = byOutcome.get(key) ?? { n: 0, cost: 0 };
+    cur.n += 1;
+    cur.cost += r.costUsd ?? 0;
+    byOutcome.set(key, cur);
+  }
+  for (const [key, v] of [...byOutcome.entries()].sort((a, b) => b[1].n - a[1].n)) {
+    console.log(`  ${key}: ${v.n} runs ($${v.cost.toFixed(4)})`);
+  }
+
+  console.log("\n=== Cost economics (by task type) ===");
+  // cost_usd is the only cumulative-truthful figure Claude Code returns; tokens
+  // are summed across turns in the runner. A low cache-hit rate means the prompt
+  // cache keeps missing (re-writing the prefix at the 1.25x write premium) — the
+  // lever is fewer/faster turns and a smaller prefix, not the model.
+  const types = [...new Set(d.runs.map((r) => r.taskType))];
+  const econ = types
+    .map((t) => {
+      const rs = d.runs.filter((r) => r.taskType === t && r.costUsd != null);
+      const durations = d.runs.filter((r) => r.taskType === t && r.durationMs != null).map((r) => r.durationMs!);
+      const cost = rs.reduce((s, r) => s + (r.costUsd ?? 0), 0);
+      return {
+        t, n: rs.length, cost,
+        costAvg: rs.length ? cost / rs.length : 0,
+        turnsAvg: rs.length ? rs.reduce((s, r) => s + (r.numTurns ?? 0), 0) / rs.length : 0,
+        p50: percentile(durations, 50), p90: percentile(durations, 90),
+        cr: rs.reduce((s, r) => s + r.cacheRead, 0), cw: rs.reduce((s, r) => s + r.cacheWrite, 0),
+      };
+    })
+    .filter((e) => e.n > 0)
+    .sort((a, b) => b.cost - a.cost);
+  if (econ.length === 0) {
+    console.log("  (no completed runs with cost recorded)");
+  } else {
+    console.log("  task          runs   $total   $/run  turns/run   dur p50   dur p90  cache hit");
+    for (const e of econ) {
+      console.log(
+        `  ${e.t.padEnd(12)} ${String(e.n).padStart(4)}  ${("$" + e.cost.toFixed(4)).padStart(8)} ` +
+          `${("$" + e.costAvg.toFixed(4)).padStart(7)} ${e.turnsAvg.toFixed(1).padStart(9)}  ` +
+          `${fmtDur(e.p50).padStart(8)}  ${fmtDur(e.p90).padStart(8)}  ${fmtRate(cacheHitRate(e.cr, e.cw)).padStart(9)}`,
+      );
+    }
+    console.log(`  total spend: $${econ.reduce((s, e) => s + e.cost, 0).toFixed(4)}`);
+    const cr = econ.reduce((s, e) => s + e.cr, 0);
+    const cw = econ.reduce((s, e) => s + e.cw, 0);
+    if (cr + cw > 0) {
+      console.log(
+        `  cache write/read ratio: ${(cw / Math.max(cr, 1)).toFixed(2)} ` +
+          `(high ⇒ prompt-cache misses — trim the prefix / keep turns under the 5-min TTL)`,
+      );
+    }
+  }
+
+  console.log("\n=== Success by model (implement routing) ===");
+  const models = [...new Set(d.runs.filter((r) => r.model != null && r.outcome != null).map((r) => r.model!))];
+  if (models.length === 0) console.log("  (no model data yet — recorded from this release on)");
+  for (const m of models) {
+    const rs = d.runs.filter((r) => r.model === m && r.outcome != null);
+    const ok = rs.filter((r) => r.outcome === "success").length;
+    const cost = rs.reduce((s, r) => s + (r.costUsd ?? 0), 0);
+    console.log(
+      `  ${m.padEnd(18)} ${String(rs.length).padStart(4)} runs  ${fmtRate(ok / rs.length).padStart(5)} success  $${(cost / rs.length).toFixed(4)}/run`,
+    );
+  }
+
+  console.log("\n=== Host timings (sandbox lifecycle) ===");
+  const labels = [...new Set(d.timings.map((t) => t.label))];
+  if (labels.length === 0) console.log("  (none recorded yet)");
+  for (const l of labels) {
+    const ms = d.timings.filter((t) => t.label === l).map((t) => t.ms);
+    console.log(`  ${l.padEnd(14)} n=${String(ms.length).padStart(3)}  p50=${fmtDur(percentile(ms, 50))}  p90=${fmtDur(percentile(ms, 90))}`);
+  }
+
+  console.log("\n=== Human-gate latency ===");
+  const dwells = approvalDwellsMs(d.phaseEvents);
+  const e2e = createdToPrMs(d.phaseEvents, d.sessionsWithPr);
+  console.log(`  approval wait: n=${dwells.length}  p50=${fmtDur(percentile(dwells, 50))}  p90=${fmtDur(percentile(dwells, 90))}`);
+  console.log(`  created→PR:    n=${e2e.length}  p50=${fmtDur(percentile(e2e, 50))}  p90=${fmtDur(percentile(e2e, 90))}`);
+
+  console.log("\n=== Failed tool results, grouped (top 30) ===");
+  if (d.failureGroups.length === 0) console.log("  (none recorded)");
+  for (const g of d.failureGroups) console.log(`  ${String(g.n).padStart(4)}×  ${g.key}`);
+
+  console.log("\n=== Non-success runs (latest 10, last 3 events each) ===");
+  if (d.failedRuns.length === 0) console.log("  (none)");
+  for (const r of d.failedRuns) {
+    console.log(`  run ${r.id} [${r.taskType}] ${r.outcome}${r.error ? ` — ${r.error.slice(0, 120)}` : ""}`);
+    for (const e of r.lastEvents) console.log(`     ${e.ts} ${e.type} ${e.payload.slice(0, 140)}`);
+  }
+}

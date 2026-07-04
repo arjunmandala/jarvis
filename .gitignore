@@ -5,3 +5,4 @@ dist/
 *.db-journal
 .superpowers/
 .tools/
+jarvis-report.html

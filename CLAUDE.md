@@ -23,7 +23,7 @@ npm start             # server, no watcher
 npm run typecheck     # tsc --noEmit
 npm test              # vitest run (whole suite, once)
 npm run test:watch    # vitest (watch mode)
-npm run report        # failure-pattern mining over run telemetry (reads jarvis.db)
+npm run report        # failure-pattern + economics report (console + jarvis-report.html dashboard)
 ```
 
 Single test file: `npx vitest run tests/orchestrator/pipeline.test.ts`
@@ -243,10 +243,12 @@ fixed contract `Type: <…>` / `Scope: <small|large>`; `implementTask` parses th
 
 ### Persistence (`src/store/sessions.ts`, SQLite via `node:sqlite`)
 
-Four tables, no ORM: `sessions` (one row per Linear agent session — phase, plan,
+Five tables, no ORM: `sessions` (one row per Linear agent session — phase, plan,
 sandboxId), `repo_maps` (one row per target repo, cached architecture map),
 `runs` (one row per agent invocation — cost/tokens/outcome), `run_events` (raw
-`JarvisEvent` stream per run, for `npm run report`'s failure-pattern mining).
+`JarvisEvent` stream per run, for `npm run report`'s failure-pattern mining),
+`session_events` (phase transitions + host timings per session — approval dwell,
+created→PR, and sandbox_create/clone/serena_index/history durations for the report).
 Column migrations are hand-rolled (`ALTER TABLE ... ADD COLUMN` guarded by a
 `pragma_table_info` check) since SQLite has no `ADD COLUMN IF NOT EXISTS`.
 
