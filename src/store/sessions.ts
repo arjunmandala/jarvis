@@ -99,6 +99,12 @@ export class SessionStore {
     if (!runCols.some((c) => c.name === "tokens_cache_write")) {
       this.#db.exec(`ALTER TABLE runs ADD COLUMN tokens_cache_write INTEGER`);
     }
+    if (!runCols.some((c) => c.name === "model")) {
+      this.#db.exec(`ALTER TABLE runs ADD COLUMN model TEXT`);
+    }
+    if (!runCols.some((c) => c.name === "effort")) {
+      this.#db.exec(`ALTER TABLE runs ADD COLUMN effort TEXT`);
+    }
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS run_events (
         id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,6 +114,10 @@ export class SessionStore {
         payload TEXT NOT NULL
       ) STRICT
     `);
+    // Read paths: run_events by run (report, history export), runs by session
+    // (history export, finishOpenRun). IF NOT EXISTS keeps re-open safe.
+    this.#db.exec(`CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id)`);
+    this.#db.exec(`CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(agent_session_id)`);
   }
 
   getRepoMap(repo: string): string | undefined {
@@ -128,10 +138,18 @@ export class SessionStore {
       .run(repo, map, new Date().toISOString());
   }
 
-  createRun(agentSessionId: string, taskType: string, repo: string | null): number {
+  createRun(
+    agentSessionId: string,
+    taskType: string,
+    repo: string | null,
+    model: string | null = null,
+    effort: string | null = null,
+  ): number {
     const r = this.#db
-      .prepare(`INSERT INTO runs (agent_session_id, task_type, repo, started_at) VALUES (?, ?, ?, ?)`)
-      .run(agentSessionId, taskType, repo, new Date().toISOString());
+      .prepare(
+        `INSERT INTO runs (agent_session_id, task_type, repo, started_at, model, effort) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(agentSessionId, taskType, repo, new Date().toISOString(), model, effort);
     return Number(r.lastInsertRowid);
   }
 

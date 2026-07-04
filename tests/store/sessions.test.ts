@@ -3,6 +3,7 @@ import { SessionStore } from "../../src/store/sessions.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 describe("SessionStore", () => {
   it("upserts and reads phase", () => {
@@ -292,5 +293,28 @@ describe("listByIssue and getRunLogsBySession", () => {
     expect(logs[0].jsonl).toBe("");
     expect(s.getRunLogsBySession("as_nope")).toEqual([]);
     s.close();
+  });
+});
+
+describe("runs model/effort columns", () => {
+  let dir: string;
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("records model and effort when provided, null otherwise", () => {
+    dir = mkdtempSync(join(tmpdir(), "sessions-test-"));
+    const path = join(dir, "runs.db");
+    const s = new SessionStore(path);
+    const withModel = s.createRun("as_me", "implement", "o/r", "claude-opus-4-8", "high");
+    const without = s.createRun("as_me", "map", "o/r");
+    s.close();
+    // the store has no per-run getter — the report reads SQL directly, so verify the same way
+    const db = new DatabaseSync(path, { readOnly: true });
+    const rows = db.prepare(`SELECT id, model, effort FROM runs ORDER BY id`).all() as
+      { id: number; model: string | null; effort: string | null }[];
+    db.close();
+    expect(rows.find((r) => r.id === withModel)).toMatchObject({ model: "claude-opus-4-8", effort: "high" });
+    expect(rows.find((r) => r.id === without)).toMatchObject({ model: null, effort: null });
   });
 });
