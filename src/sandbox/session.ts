@@ -240,7 +240,7 @@ export async function runAgent(
   // (same execution context as the runner) — e2b's files.write gets a 500
   // "permission denied" overwriting a file the runner process wrote, even with
   // matching ownership (verified live against the jarvis-agent template).
-  await sbx.commands.run(`rm -f ${RESULT_FILE} ${INBOX_FILE}`, { timeoutMs: 60_000 });
+  await sbx.commands.run(`rm -f ${taskPath} ${RESULT_FILE} ${INBOX_FILE}`, { timeoutMs: 60_000 });
   await sbx.files.write(taskPath, JSON.stringify(task));
 
   const parser = new LineParser();

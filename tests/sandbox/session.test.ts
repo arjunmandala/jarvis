@@ -329,7 +329,7 @@ describe("runAgent inbox clearing", () => {
     const task = { goal: "g", cwd: "/r", model: "m", systemAppend: "", allowedTools: [], maxTurns: 1, maxBudgetUsd: 1 } as AgentTask;
     const { result } = await runAgent(sbx, "key", task, () => undefined);
     expect(result?.kind).toBe("result");
-    expect(commandLog[0]).toBe(`rm -f ${RESULT_FILE} ${INBOX_FILE}`);
+    expect(commandLog[0]).toBe(`rm -f /tmp/jarvis-task.json ${RESULT_FILE} ${INBOX_FILE}`);
   });
 });
 
