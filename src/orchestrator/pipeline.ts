@@ -1,5 +1,5 @@
 import type { Config } from "../config.ts";
-import type { SessionStore, Phase, SessionRow } from "../store/sessions.ts";
+import type { SessionStore, Phase, SessionRow, RunFinish } from "../store/sessions.ts";
 import type { Activities } from "../linear/activities.ts";
 import type { IssueContext } from "../linear/context.ts";
 import { APPROVAL_FOOTER, isValidBranchName } from "../linear/context.ts";
@@ -75,6 +75,29 @@ export async function recoverPlan(
   console.log(`[recover] ${agentSessionId} recovered plan from Linear (${recovered.length} chars)`);
   store.setPlan(agentSessionId, recovered);
   return recovered;
+}
+
+// Result → runs-row mapping, shared by the live path (#logUsage) and reconcile
+// (which lost the in-memory runId across the restart and closes the row via
+// finishOpenRun instead).
+export function runFinishFrom(result: JarvisEvent | null): RunFinish {
+  const outcome =
+    result == null ? "no_result"
+    : result.kind === "error" ? "error"
+    : result.kind !== "result" ? "no_result"
+    : result.text?.trim().startsWith("PR_FAILED:") ? "pr_failed"
+    : result.subtype;
+  const u = result?.kind === "result" ? result.usage ?? {} : {};
+  return {
+    outcome,
+    costUsd: result?.kind === "result" ? result.costUsd : null,
+    numTurns: result?.kind === "result" ? (result.numTurns ?? null) : null,
+    tokensIn: u.input_tokens ?? 0, // uncached input; cache tokens tracked separately
+    tokensOut: u.output_tokens ?? 0,
+    tokensCacheRead: u.cache_read_input_tokens ?? 0,
+    tokensCacheWrite: u.cache_creation_input_tokens ?? 0,
+    error: result?.kind === "error" ? result.message : null,
+  };
 }
 
 // A connected sandbox we can watch and then kill — the seam reconcile() needs.
@@ -153,23 +176,7 @@ export class Orchestrator {
     }
     if (runId == null) return;
     try {
-      const outcome =
-        result == null ? "no_result"
-        : result.kind === "error" ? "error"
-        : result.kind !== "result" ? "no_result"
-        : result.text?.trim().startsWith("PR_FAILED:") ? "pr_failed"
-        : result.subtype;
-      const u = result?.kind === "result" ? result.usage ?? {} : {};
-      this.#store.finishRun(runId, {
-        outcome,
-        costUsd: result?.kind === "result" ? result.costUsd : null,
-        numTurns: result?.kind === "result" ? (result.numTurns ?? null) : null,
-        tokensIn: u.input_tokens ?? 0, // uncached input; cache tokens tracked separately below
-        tokensOut: u.output_tokens ?? 0,
-        tokensCacheRead: u.cache_read_input_tokens ?? 0,
-        tokensCacheWrite: u.cache_creation_input_tokens ?? 0,
-        error: result?.kind === "error" ? result.message : null,
-      });
+      this.#store.finishRun(runId, runFinishFrom(result));
     } catch (err) {
       console.error(`[telemetry] finishRun failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -223,7 +230,8 @@ export class Orchestrator {
   ): Promise<JarvisEvent | null> {
     let runId: number | null = null;
     try {
-      runId = this.#store.createRun(sessionId, taskType, this.#config.targetRepo);
+      // effort defaults to "high" in the runner when unset — record the effective value
+      runId = this.#store.createRun(sessionId, taskType, this.#config.targetRepo, task.model, task.effort ?? "high");
     } catch (err) {
       console.error(`[telemetry] createRun failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -668,11 +676,13 @@ export class Orchestrator {
   // done-with-PR follow-ups, which require phase=done), and reconciled rows stay
   // in plan/implement/review until #finish* moves them.
   async reconcile(): Promise<void> {
-    const rows = this.#store.listByPhase("plan", "implement", "review");
-    if (rows.length === 0) return;
-    console.log(`[reconcile] ${rows.length} in-flight session(s) to reconcile`);
-    await Promise.allSettled(
-      rows.map(async (row) => {
+    const bootIso = new Date().toISOString();
+    try {
+      const rows = this.#store.listByPhase("plan", "implement", "review");
+      if (rows.length > 0) {
+        console.log(`[reconcile] ${rows.length} in-flight session(s) to reconcile`);
+        await Promise.allSettled(
+          rows.map(async (row) => {
         const id = row.agentSessionId;
         const acts = this.#makeActs(id);
         // review is advisory: recover to done (retryable by replying), not error
@@ -714,6 +724,14 @@ export class Orchestrator {
             }
             console.log(`[reconcile] ${id} recovered result (${result.kind}) — finishing phase=${row.phase}`);
             this.#logUsage(`reconcile ${id}`, result);
+            // The restart lost the in-memory runId — close the orphaned runs row
+            // with the recovered result so the sweep below doesn't mislabel it.
+            try {
+              const closed = this.#store.finishOpenRun(id, runFinishFrom(result));
+              if (closed != null) console.log(`[reconcile] ${id} closed orphaned run ${closed}`);
+            } catch (err) {
+              console.error(`[telemetry] finishOpenRun failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
             if (row.phase === "plan") {
               await this.#finishPlan(id, acts, result);
             } else if (row.phase === "review") {
@@ -727,8 +745,19 @@ export class Orchestrator {
         } catch (err) {
           console.error(`[reconcile] ${id} reconciliation failed: ${err instanceof Error ? err.message : String(err)}`);
         }
-      }),
-    );
+          }),
+        );
+      }
+    } finally {
+      // Whatever recovery didn't close above died with the previous host — stamp
+      // it so aggregates stay honest. Runs started after boot are untouched.
+      try {
+        const n = this.#store.markInterruptedRuns(bootIso);
+        if (n > 0) console.log(`[reconcile] marked ${n} orphaned run(s) interrupted`);
+      } catch (err) {
+        console.error(`[telemetry] markInterruptedRuns failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 }
 

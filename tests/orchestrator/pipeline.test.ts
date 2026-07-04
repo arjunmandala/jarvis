@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Sandbox } from "e2b";
-import { nextPhase, toolParameter, Orchestrator, recoverPlan, diffExceedsThreshold } from "../../src/orchestrator/pipeline.ts";
+import { nextPhase, toolParameter, Orchestrator, recoverPlan, diffExceedsThreshold, runFinishFrom } from "../../src/orchestrator/pipeline.ts";
 import { SessionStore } from "../../src/store/sessions.ts";
 import type { Activities } from "../../src/linear/activities.ts";
 import type { IssueContext } from "../../src/linear/context.ts";
@@ -690,6 +690,91 @@ describe("on-demand review on done sessions", () => {
     await orch.reconcile();
     expect(store.get("as_od4")?.phase).toBe("done");
     expect(log.some((l) => l.startsWith("error:"))).toBe(true);
+    store.close();
+  });
+});
+
+describe("runFinishFrom", () => {
+  it("maps a success result with usage", () => {
+    expect(
+      runFinishFrom({
+        kind: "result", subtype: "success", text: "https://github.com/o/r/pull/1",
+        costUsd: 1.25, sessionId: null, numTurns: 7,
+        usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 30, cache_creation_input_tokens: 40 },
+      }),
+    ).toEqual({
+      outcome: "success", costUsd: 1.25, numTurns: 7,
+      tokensIn: 10, tokensOut: 20, tokensCacheRead: 30, tokensCacheWrite: 40, error: null,
+    });
+  });
+
+  it("maps PR_FAILED text to the pr_failed outcome", () => {
+    const f = runFinishFrom({ kind: "result", subtype: "success", text: "PR_FAILED: no permission", costUsd: null, sessionId: null });
+    expect(f.outcome).toBe("pr_failed");
+  });
+
+  it("maps error events and null results", () => {
+    expect(runFinishFrom({ kind: "error", message: "boom" })).toMatchObject({ outcome: "error", error: "boom" });
+    expect(runFinishFrom(null)).toMatchObject({ outcome: "no_result", costUsd: null });
+  });
+});
+
+describe("reconcile telemetry", () => {
+  const RESULT_JSON = JSON.stringify({
+    kind: "result", subtype: "success", text: "Type: chore\nScope: small\n\n- do it",
+    costUsd: 0.4, sessionId: null, numTurns: 3,
+    usage: { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4 },
+  });
+
+  // Minimal Reconnected fake: watchDetached reads RESULT_FILE on its first poll,
+  // so a resolving files.read returns immediately — no timers involved.
+  function fakeConnect(resultJson: string | null) {
+    return async () => ({
+      files: {
+        read: async () => {
+          if (resultJson == null) throw new Error("ENOENT");
+          return resultJson;
+        },
+        write: async () => ({}),
+      },
+      commands: { run: async () => ({ exitCode: 0 }), list: async () => [] },
+      kill: async () => undefined,
+    });
+  }
+
+  it("closes the orphaned runs row with the recovered result", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_rc1", "plan", "iss");
+    store.setSandbox("as_rc1", "sbx_1");
+    store.createRun("as_rc1", "plan", "o/r"); // left open by the dead host
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log), undefined, fakeConnect(RESULT_JSON));
+    await orch.reconcile();
+    expect(store.getRunLogsBySession("as_rc1").map((l) => l.outcome)).toEqual(["success"]);
+    expect(store.get("as_rc1")?.phase).toBe("await_approval"); // #finishPlan replayed
+    expect(log.some((l) => l.startsWith("elicitation:"))).toBe(true);
+    store.close();
+  });
+
+  it("sweeps unrecoverable open runs as interrupted", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_rc2", "plan", "iss"); // no sandboxId — reconcile fails it loud
+    store.createRun("as_rc2", "plan", "o/r");
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log), undefined, fakeConnect(null));
+    await orch.reconcile();
+    expect(store.getRunLogsBySession("as_rc2").map((l) => l.outcome)).toEqual(["interrupted"]);
+    expect(store.get("as_rc2")?.phase).toBe("error");
+    store.close();
+  });
+
+  it("sweeps orphans even when no sessions are in a run phase", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_rc3", "done", "iss"); // session moved on; run row left open
+    store.createRun("as_rc3", "review", "o/r");
+    const orch = new Orchestrator({} as Config, store, () => fakeActs([]));
+    await orch.reconcile();
+    expect(store.getRunLogsBySession("as_rc3").map((l) => l.outcome)).toEqual(["interrupted"]);
     store.close();
   });
 });
