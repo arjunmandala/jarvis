@@ -36,6 +36,15 @@ export interface RunLog {
   jsonl: string;
 }
 
+// One session_events row: a phase transition (ms NULL) or a host-side timing
+// (sandbox_create / clone / serena_index / history) in elapsed milliseconds.
+export interface SessionEvent {
+  ts: string;
+  kind: "phase" | "timing";
+  label: string;
+  ms: number | null;
+}
+
 export class SessionStore {
   #db: DatabaseSync;
 
@@ -118,6 +127,17 @@ export class SessionStore {
     // (history export, finishOpenRun). IF NOT EXISTS keeps re-open safe.
     this.#db.exec(`CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id)`);
     this.#db.exec(`CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(agent_session_id)`);
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS session_events (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_session_id TEXT NOT NULL,
+        ts               TEXT NOT NULL,
+        kind             TEXT NOT NULL,
+        label            TEXT NOT NULL,
+        ms               INTEGER
+      ) STRICT
+    `);
+    this.#db.exec(`CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(agent_session_id)`);
   }
 
   getRepoMap(repo: string): string | undefined {
@@ -159,6 +179,30 @@ export class SessionStore {
       .run(runId, new Date().toISOString(), type, JSON.stringify(payload));
   }
 
+  #addSessionEvent(agentSessionId: string, kind: "phase" | "timing", label: string, ms: number | null): void {
+    this.#db
+      .prepare(`INSERT INTO session_events (agent_session_id, ts, kind, label, ms) VALUES (?, ?, ?, ?, ?)`)
+      .run(agentSessionId, new Date().toISOString(), kind, label, ms);
+  }
+
+  // Host-side wall-clock telemetry (sandbox_create / clone / serena_index / history).
+  addTiming(agentSessionId: string, label: string, ms: number): void {
+    this.#addSessionEvent(agentSessionId, "timing", label, Math.round(ms));
+  }
+
+  listSessionEvents(agentSessionId: string): SessionEvent[] {
+    return this.#db
+      .prepare(`SELECT ts, kind, label, ms FROM session_events WHERE agent_session_id = ? ORDER BY id ASC`)
+      .all(agentSessionId) as unknown as SessionEvent[];
+  }
+
+  #currentPhase(agentSessionId: string): Phase | undefined {
+    const row = this.#db.prepare(`SELECT phase FROM sessions WHERE agent_session_id = ?`).get(agentSessionId) as
+      | { phase: Phase }
+      | undefined;
+    return row?.phase;
+  }
+
   finishRun(runId: number, f: RunFinish): void {
     this.#db
       .prepare(
@@ -173,6 +217,7 @@ export class SessionStore {
   }
 
   upsert(agentSessionId: string, phase: Phase, issueId: string | null = null): void {
+    const prev = this.#currentPhase(agentSessionId);
     this.#db
       .prepare(
         `INSERT INTO sessions (agent_session_id, phase, issue_id, updated_at)
@@ -183,12 +228,18 @@ export class SessionStore {
                        updated_at = excluded.updated_at`,
       )
       .run(agentSessionId, phase, issueId, new Date().toISOString());
+    // Phase history feeds the report's latency metrics (approval dwell,
+    // created→PR). Only actual transitions — duplicate webhooks re-upsert
+    // the same phase and must not spam events.
+    if (prev !== phase) this.#addSessionEvent(agentSessionId, "phase", phase, null);
   }
 
   setPhase(agentSessionId: string, phase: Phase): void {
+    const prev = this.#currentPhase(agentSessionId);
     this.#db
       .prepare(`UPDATE sessions SET phase = ?, updated_at = ? WHERE agent_session_id = ?`)
       .run(phase, new Date().toISOString(), agentSessionId);
+    if (prev !== undefined && prev !== phase) this.#addSessionEvent(agentSessionId, "phase", phase, null);
   }
 
   setPlan(agentSessionId: string, plan: string): void {

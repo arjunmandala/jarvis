@@ -318,3 +318,42 @@ describe("runs model/effort columns", () => {
     expect(rows.find((r) => r.id === without)).toMatchObject({ model: null, effort: null });
   });
 });
+
+describe("session events", () => {
+  it("records a phase event only on actual phase changes", () => {
+    const s = new SessionStore(":memory:");
+    s.upsert("as_e1", "plan", "iss"); // change (new row)
+    s.upsert("as_e1", "plan", "iss"); // duplicate webhook — no change
+    s.setPhase("as_e1", "await_approval"); // change
+    s.setPhase("as_e1", "await_approval"); // no change
+    s.setPhase("as_e1", "implement"); // change
+    const evs = s.listSessionEvents("as_e1");
+    expect(evs.map((e) => [e.kind, e.label])).toEqual([
+      ["phase", "plan"],
+      ["phase", "await_approval"],
+      ["phase", "implement"],
+    ]);
+    expect(evs.every((e) => e.ms === null)).toBe(true);
+    s.close();
+  });
+
+  it("setPhase on an unknown session records nothing", () => {
+    const s = new SessionStore(":memory:");
+    s.setPhase("missing", "done");
+    expect(s.listSessionEvents("missing")).toEqual([]);
+    s.close();
+  });
+
+  it("addTiming records rounded timing events in order", () => {
+    const s = new SessionStore(":memory:");
+    s.upsert("as_e2", "plan", "iss");
+    s.addTiming("as_e2", "sandbox_create", 1234.6);
+    s.addTiming("as_e2", "clone", 900);
+    const evs = s.listSessionEvents("as_e2").filter((e) => e.kind === "timing");
+    expect(evs.map((e) => [e.label, e.ms])).toEqual([
+      ["sandbox_create", 1235],
+      ["clone", 900],
+    ]);
+    s.close();
+  });
+});
