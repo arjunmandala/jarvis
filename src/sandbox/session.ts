@@ -7,6 +7,9 @@ export interface SandboxConfig {
   template: string;
   ghToken: string;
   targetRepo: string; // "owner/name"
+  // Host-side wall-clock telemetry: called with (label, elapsedMs) for
+  // sandbox_create / clone / serena_index. Callers supply a non-throwing callback.
+  onTiming?: (label: string, ms: number) => void;
 }
 
 export const REPO_DIR = "/home/user/repo";
@@ -34,6 +37,7 @@ export async function withRetries<T>(
 }
 
 export async function withSandbox<T>(cfg: SandboxConfig, fn: (sbx: Sandbox) => Promise<T>): Promise<T> {
+  const t0 = Date.now();
   const sbx = await withRetries("sandbox.create", () =>
     Sandbox.create(cfg.template, {
       apiKey: cfg.apiKey,
@@ -42,6 +46,7 @@ export async function withSandbox<T>(cfg: SandboxConfig, fn: (sbx: Sandbox) => P
       envs: { GH_TOKEN: cfg.ghToken },
     }),
   );
+  cfg.onTiming?.("sandbox_create", Date.now() - t0);
   try {
     return await fn(sbx);
   } finally {
@@ -60,13 +65,17 @@ export async function cloneRepo(sbx: Sandbox, cfg: SandboxConfig, branch?: strin
   // branch is validated (isValidBranchName) before it ever reaches this
   // call — see src/linear/context.ts and its callers in orchestrator/pipeline.ts.
   const branchFlag = branch ? `-b ${branch} ` : "";
+  const cloneStart = Date.now();
   await withRetries("git clone", async () => {
     const res = await runCommand(sbx, `git clone ${branchFlag}${url} ${REPO_DIR}`);
     if (res.exitCode !== 0) {
       throw new Error(redactSecret(`git clone failed (${res.exitCode}): ${res.stderr}`, cfg.ghToken));
     }
   });
+  cfg.onTiming?.("clone", Date.now() - cloneStart);
+  const indexStart = Date.now();
   await indexRepo(sbx, cfg.ghToken);
+  cfg.onTiming?.("serena_index", Date.now() - indexStart);
 }
 
 // Serena index: pays the LSP indexing cost once up front instead of on the

@@ -357,4 +357,16 @@ describe("cloneRepo", () => {
       `git clone -b feature/foo https://x-access-token:tok@github.com/owner/repo.git /home/user/repo`,
     );
   });
+
+  it("emits clone and serena_index timings via cfg.onTiming", async () => {
+    const f = makeFake({});
+    f.sbx.commands.run = async (cmd: string) => {
+      f.commandLog.push(cmd);
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    const seen: string[] = [];
+    const timed: SandboxConfig = { ...cfg, onTiming: (label, ms) => seen.push(`${label}:${ms >= 0}`) };
+    await cloneRepo(f.sbx as never, timed);
+    expect(seen).toEqual(["clone:true", "serena_index:true"]);
+  });
 });

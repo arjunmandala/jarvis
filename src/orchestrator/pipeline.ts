@@ -138,10 +138,19 @@ export class Orchestrator {
       ((sandboxId) => Sandbox.connect(sandboxId, { apiKey: this.#config.e2bApiKey }) as Promise<Reconnected>);
   }
 
-  #sbxCfg() {
+  // sessionId opts the sandbox lifecycle into timing telemetry (session_events);
+  // omitted (tests, no-session contexts) → no callback, same behavior as before.
+  #sbxCfg(sessionId?: string) {
     return {
       apiKey: this.#config.e2bApiKey, template: this.#config.e2bTemplate,
       ghToken: this.#config.ghToken, targetRepo: this.#config.targetRepo,
+      onTiming: sessionId === undefined ? undefined : (label: string, ms: number) => {
+        try {
+          this.#store.addTiming(sessionId, label, ms);
+        } catch (err) {
+          console.error(`[telemetry] addTiming failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      },
     };
   }
 
@@ -161,6 +170,21 @@ export class Orchestrator {
       this.#store.addRunEvent(runId, e.kind, e);
     } catch (err) {
       console.error(`[telemetry] addRunEvent failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // Times an awaited step into session_events. Advisory: a failed write logs
+  // and the step's own result/throw passes through untouched.
+  async #timed<T>(sessionId: string, label: string, fn: () => Promise<T>): Promise<T> {
+    const t0 = Date.now();
+    try {
+      return await fn();
+    } finally {
+      try {
+        this.#store.addTiming(sessionId, label, Date.now() - t0);
+      } catch (err) {
+        console.error(`[telemetry] addTiming failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   }
 
@@ -335,10 +359,10 @@ export class Orchestrator {
     await acts.thought("Reading the codebase to draft a plan…");
 
     let cloneFailed = false;
-    const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
+    const result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       try {
-        await cloneRepo(sbx, this.#sbxCfg(), branch);
+        await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), branch);
       } catch (err) {
         cloneFailed = true;
         console.error(`[phase] ${ctx.agentSessionId} clone failed for branch ${branch ?? "(default)"}: ${err instanceof Error ? err.message : String(err)}`);
@@ -360,7 +384,9 @@ export class Orchestrator {
         }
       }
 
-      const history = await prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread);
+      const history = await this.#timed(ctx.agentSessionId, "history", () =>
+        prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
+      );
       return this.#trackedRun(ctx.agentSessionId, "plan", sbx, planTask(ctx, map, history), acts);
     });
 
@@ -451,10 +477,12 @@ export class Orchestrator {
       await acts.thought("Revising the plan per your feedback…");
 
       const map = this.#store.getRepoMap(this.#config.targetRepo);
-      const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
+      const result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
         this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
-        await cloneRepo(sbx, this.#sbxCfg(), row.branch);
-        const history = await prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread);
+        await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), row.branch);
+        const history = await this.#timed(ctx.agentSessionId, "history", () =>
+          prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
+        );
         return this.#trackedRun(ctx.agentSessionId, "revise", sbx, reviseTask(ctx, plan, replyText, map, history), acts);
       });
 
@@ -484,10 +512,12 @@ export class Orchestrator {
 
     const map = this.#store.getRepoMap(this.#config.targetRepo);
     let review: string | null = null;
-    const result = await withSandbox(this.#sbxCfg(), async (sbx) => {
+    const result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
-      await cloneRepo(sbx, this.#sbxCfg(), baseBranch);
-      const history = await prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread);
+      await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), baseBranch);
+      const history = await this.#timed(ctx.agentSessionId, "history", () =>
+        prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
+      );
       const r = await this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map, workBranch, history), acts);
       // Persist the PR URL BEFORE self-review: the review run deletes and
       // rewrites RESULT_FILE, so a restart (or stop) during self-review would
@@ -590,10 +620,12 @@ export class Orchestrator {
     const map = this.#store.getRepoMap(this.#config.targetRepo);
     let result: JarvisEvent | null = null;
     try {
-      result = await withSandbox(this.#sbxCfg(), async (sbx) => {
+      result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
         this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
-        await cloneRepo(sbx, this.#sbxCfg(), row.branch);
-        const history = await prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread);
+        await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), row.branch);
+        const history = await this.#timed(ctx.agentSessionId, "history", () =>
+          prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
+        );
         return this.#trackedRun(ctx.agentSessionId, "review", sbx, reviewTask(ctx, row.prUrl!, row.plan, replyText, map, history), acts);
       });
     } catch (err) {
