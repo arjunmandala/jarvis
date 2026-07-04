@@ -357,3 +357,48 @@ describe("session events", () => {
     s.close();
   });
 });
+
+describe("finishOpenRun and markInterruptedRuns", () => {
+  const FINISH = {
+    outcome: "success", costUsd: 0.1, numTurns: 3,
+    tokensIn: 10, tokensOut: 20, tokensCacheRead: 5, tokensCacheWrite: 2, error: null,
+  };
+
+  it("finishOpenRun closes the latest open run and returns its id", () => {
+    const s = new SessionStore(":memory:");
+    const closed = s.createRun("as_o1", "map", "o/r");
+    s.finishRun(closed, FINISH);
+    const open = s.createRun("as_o1", "plan", "o/r");
+    expect(s.finishOpenRun("as_o1", FINISH)).toBe(open);
+    expect(s.finishOpenRun("as_o1", FINISH)).toBeNull(); // nothing left open
+    expect(s.getRunLogsBySession("as_o1").map((l) => l.outcome)).toEqual(["success", "success"]);
+    s.close();
+  });
+
+  it("finishOpenRun returns null for a session with no runs", () => {
+    const s = new SessionStore(":memory:");
+    expect(s.finishOpenRun("as_none", FINISH)).toBeNull();
+    s.close();
+  });
+
+  it("markInterruptedRuns sweeps only still-open runs started at or before the cutoff", () => {
+    const s = new SessionStore(":memory:");
+    const open = s.createRun("as_s1", "implement", "o/r");
+    const closed = s.createRun("as_s1", "plan", "o/r");
+    s.finishRun(closed, FINISH);
+    expect(s.markInterruptedRuns(new Date().toISOString())).toBe(1);
+    const logs = s.getRunLogsBySession("as_s1");
+    expect(logs.find((l) => l.runId === open)?.outcome).toBe("interrupted");
+    expect(logs.find((l) => l.runId === closed)?.outcome).toBe("success");
+    expect(s.markInterruptedRuns(new Date().toISOString())).toBe(0); // idempotent
+    s.close();
+  });
+
+  it("does not sweep runs started after the cutoff", () => {
+    const s = new SessionStore(":memory:");
+    const cutoff = new Date(Date.now() - 60_000).toISOString(); // one minute ago
+    s.createRun("as_s2", "plan", "o/r");
+    expect(s.markInterruptedRuns(cutoff)).toBe(0);
+    s.close();
+  });
+});

@@ -216,6 +216,28 @@ export class SessionStore {
       );
   }
 
+  // Reconcile's seam: a restart loses the in-memory runId, so the recovered run
+  // is found as "latest still-open run for this session". Returns the closed
+  // run's id, or null when the session has no open run.
+  finishOpenRun(agentSessionId: string, f: RunFinish): number | null {
+    const row = this.#db
+      .prepare(`SELECT id FROM runs WHERE agent_session_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1`)
+      .get(agentSessionId) as { id: number } | undefined;
+    if (!row) return null;
+    this.finishRun(row.id, f);
+    return row.id;
+  }
+
+  // Boot sweep: any run still open from before boot died with its host. `<=` not
+  // `<`: a run created in the same millisecond the cutoff was captured is
+  // pre-boot by construction (the sweep runs after reconciliation completes).
+  markInterruptedRuns(beforeIso: string): number {
+    const r = this.#db
+      .prepare(`UPDATE runs SET outcome = 'interrupted', ended_at = ? WHERE ended_at IS NULL AND started_at <= ?`)
+      .run(new Date().toISOString(), beforeIso);
+    return Number(r.changes);
+  }
+
   upsert(agentSessionId: string, phase: Phase, issueId: string | null = null): void {
     const prev = this.#currentPhase(agentSessionId);
     this.#db
