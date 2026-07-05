@@ -79,14 +79,22 @@ export async function cloneRepo(sbx: Sandbox, cfg: SandboxConfig, branch?: strin
 }
 
 // Serena index: pays the LSP indexing cost once up front instead of on the
-// agent's first symbolic query. ponytail: advisory — any failure (serena not
-// in the template yet, unsupported language, LSP crash) logs and continues;
-// the agent falls back to Grep/Glob.
+// agent's first symbolic query. This ALSO creates the repo's .serena/project.yml
+// so runner.mjs's `start-mcp-server --project` finds an existing project instead
+// of trying to auto-create one at MCP-startup time (which prompts on stdin — the
+// JSON-RPC channel — and wedges the server, leaving the agent with no serena
+// tools). `yes n |` declines serena's "Enable <lang>? [y/N]" auto-create prompt,
+// same workaround the template build uses (e2b/build-template.ts).
+// ponytail: advisory — any failure (serena missing, unsupported language, LSP
+// crash) logs and continues; the agent falls back to Grep/Glob. Upgrade to a
+// serena non-interactive flag if one lands.
 export async function indexRepo(sbx: Sandbox, ghToken = ""): Promise<void> {
   try {
-    const res = await runCommand(sbx, `serena project index ${REPO_DIR}`);
+    const res = await runCommand(sbx, `yes n | serena project index ${REPO_DIR}`);
     if (res.exitCode !== 0) {
-      console.error(redactSecret(`[serena] project index failed (${res.exitCode}): ${res.stderr.slice(0, 300)}`, ghToken));
+      // Full stderr, not a 300-char slice: the truncation is what hid this exact
+      // root cause. It's advisory logging on a bounded command — cheap to keep whole.
+      console.error(redactSecret(`[serena] project index failed (${res.exitCode}): ${res.stderr}`, ghToken));
     }
   } catch (err) {
     console.error(redactSecret(`[serena] project index errored: ${err instanceof Error ? err.message : String(err)}`, ghToken));

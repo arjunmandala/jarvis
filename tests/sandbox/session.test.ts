@@ -301,6 +301,21 @@ describe("indexRepo", () => {
     };
     await expect(indexRepo(sbx as never)).resolves.toBeUndefined();
   });
+
+  it("declines serena's stdin auto-create prompt so the MCP server can start", async () => {
+    let ran = "";
+    const sbx = {
+      commands: {
+        run: async (cmd: string) => { ran = cmd; return { exitCode: 0, stdout: "", stderr: "" }; },
+        list: async () => [],
+      },
+      files: { read: async () => "", write: async () => undefined },
+    };
+    await indexRepo(sbx as never);
+    // Without this pipe, `serena project index` hits an interactive [y/N] prompt
+    // with no TTY, never writes .serena/project.yml, and start-mcp-server wedges.
+    expect(ran).toMatch(/yes n \| serena project index/);
+  });
 });
 
 describe("runAgent inbox clearing", () => {
