@@ -53,7 +53,12 @@ const PLAN_APPEND =
   "`Type: <one of: bug, feature, refactor, chore, investigation>`\n" +
   "`Scope: <small|large>` — small = roughly 2 or fewer files and no design ambiguity; large = " +
   "multiple files, cross-cutting changes, or real design choices. Be honest: this line routes how the " +
-  "implementation is run.\n" +
+  "implementation is run.\n\n" +
+  "DECOMPOSE IF TOO BIG: if this issue is too large or has too much design ambiguity for one PR (it spans " +
+  "several unrelated areas, or the sensible approach is genuinely multiple separate pieces of work), do NOT " +
+  "produce a Type:/Scope: plan. Instead your FINAL message must start with exactly `Decomposition:` on its " +
+  "own line, followed by a numbered list, each item formatted exactly as `<n>. <title> — <one paragraph " +
+  "description>`. Use this rarely — most issues, even meaty ones, are one plan.\n\n" +
   "Then follow that type's playbook:\n" +
   "- bug: reproduce the failure FIRST (run the failing test or command with Bash), trace it to a root " +
   "cause, and plan the minimal fix plus a regression test. Use the systematic-debugging skill when the " +
@@ -70,7 +75,8 @@ const PLAN_APPEND =
   "Keep the plan proportional to the issue: a small fix gets a handful of bullets naming the exact " +
   "files and changes, nothing more.\n\n" +
   "Your FINAL message must be the complete implementation plan in Markdown, starting with the `Type:` " +
-  "and `Scope:` lines — that text is returned verbatim to the human for approval. Do not write any files." +
+  "and `Scope:` lines (or the `Decomposition:` list above) — that text is returned verbatim to the human " +
+  "for approval. Do not write any files." +
   TOOLING_APPEND +
   CONVERSE_APPEND;
 
@@ -180,6 +186,30 @@ export function reviseTask(
 // critical — stays on Opus 4.8. Missing/garbled header → Opus (no regression,
 // just no saving). ponytail: header-regex, not a classifier; the ceiling is a
 // plan that lies about its scope, which the human sees and can push back on.
+export interface DecompositionItem {
+  title: string;
+  description: string;
+}
+
+// Detects the plan agent's escape hatch for an oversized issue (see
+// PLAN_APPEND's "DECOMPOSE IF TOO BIG" instruction). Mirrors routeImplement's
+// header-prefix style: a plain string check, not a classifier — the ceiling is
+// a malformed Decomposition: list, which simply returns null and the plan is
+// then treated as a normal (if odd-looking) plan text by #finishPlan.
+export function parseDecomposition(text: string): DecompositionItem[] | null {
+  const trimmed = text.trimStart();
+  if (!trimmed.startsWith("Decomposition:")) return null;
+  const body = trimmed.slice("Decomposition:".length);
+  const items: DecompositionItem[] = [];
+  const re = /^\s*\d+\.\s*(.+?)\s*—\s*(.+)$/gm;
+  for (const m of body.matchAll(re)) {
+    const title = m[1].trim();
+    const description = m[2].trim();
+    if (title && description) items.push({ title, description });
+  }
+  return items.length > 0 ? items : null;
+}
+
 function routeImplement(plan: string): { model: string; effort: EffortLevel; maxBudgetUsd: number } {
   const header = plan.slice(0, 400).toLowerCase();
   const type = /type:\s*(bug|feature|refactor|chore|investigation)/.exec(header)?.[1];

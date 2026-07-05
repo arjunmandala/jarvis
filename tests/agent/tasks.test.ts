@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask } from "../../src/agent/tasks.ts";
+import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask, parseDecomposition } from "../../src/agent/tasks.ts";
 import type { IssueContext } from "../../src/linear/context.ts";
 
 const ctx: IssueContext = {
@@ -295,6 +295,31 @@ describe("AgentTask.images", () => {
     const withImages = planTask(ctx, undefined, undefined, images);
     expect(withImages.images).toEqual(images);
     expect(withImages.goal).toBe(planTask(ctx).goal); // goal text is untouched by images
+  });
+});
+
+describe("parseDecomposition", () => {
+  it("parses a numbered Decomposition: list", () => {
+    const text =
+      "Decomposition:\n" +
+      "1. Add the settings page — build the new /settings route and its form.\n" +
+      "2. Wire the API — persist the settings server-side and validate input.\n";
+    expect(parseDecomposition(text)).toEqual([
+      { title: "Add the settings page", description: "build the new /settings route and its form." },
+      { title: "Wire the API", description: "persist the settings server-side and validate input." },
+    ]);
+  });
+
+  it("returns null for a normal Type:/Scope: plan", () => {
+    expect(parseDecomposition("Type: feature\nScope: small\n\nDo the thing.")).toBeNull();
+  });
+
+  it("returns null when Decomposition: has no parseable items", () => {
+    expect(parseDecomposition("Decomposition:\nsomething unstructured")).toBeNull();
+  });
+
+  it("tolerates leading whitespace before Decomposition:", () => {
+    expect(parseDecomposition("  \nDecomposition:\n1. A — b.\n")).not.toBeNull();
   });
 });
 
