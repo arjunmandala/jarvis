@@ -5,6 +5,7 @@ export interface IssueContext {
   agentSessionId: string;
   organizationId: string;
   issueId: string | null;
+  teamId: string | null;
   title: string;
   description: string;
   comment: string;
@@ -19,11 +20,13 @@ export function extractContext(payload: unknown): IssueContext {
   const p = asRecord(payload);
   const session = asRecord(p.agentSession);
   const issue = asRecord(session.issue);
+  const team = asRecord(issue.team);
   const comment = asRecord(session.comment);
   return {
     agentSessionId: String(session.id ?? ""),
     organizationId: String(p.organizationId ?? ""),
     issueId: issue.id ? String(issue.id) : null,
+    teamId: team.id ? String(team.id) : null,
     title: String(issue.title ?? ""),
     description: String(issue.description ?? ""),
     comment: String(comment.body ?? ""),

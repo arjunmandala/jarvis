@@ -18,6 +18,7 @@ describe("extractContext", () => {
       agentSessionId: "as_1",
       organizationId: "org_1",
       issueId: "iss_1",
+      teamId: null,
       title: "Add /health",
       description: "return {ok:true}",
       comment: "please add it",
@@ -30,6 +31,23 @@ describe("extractContext", () => {
     expect(ctx.agentSessionId).toBe("as_2");
     expect(ctx.title).toBe("");
     expect(ctx.issueId).toBeNull();
+  });
+
+  it("pulls the team id when present", () => {
+    const payload = {
+      organizationId: "org_1",
+      agentSession: {
+        id: "as_1",
+        issue: { id: "iss_1", title: "t", description: "d", team: { id: "team_1" } },
+      },
+    };
+    const ctx = extractContext(payload);
+    expect(ctx.teamId).toBe("team_1");
+  });
+
+  it("teamId is null when missing", () => {
+    const ctx = extractContext({ agentSession: { id: "as_2" } });
+    expect(ctx.teamId).toBeNull();
   });
 });
 

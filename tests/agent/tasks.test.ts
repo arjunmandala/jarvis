@@ -3,7 +3,7 @@ import { planTask, implementTask, mapTask, reviseTask, reviewTask } from "../../
 import type { IssueContext } from "../../src/linear/context.ts";
 
 const ctx: IssueContext = {
-  agentSessionId: "as_1", organizationId: "org_1", issueId: "iss_1",
+  agentSessionId: "as_1", organizationId: "org_1", issueId: "iss_1", teamId: "team_1",
   title: "Add /health", description: "return {ok:true}", comment: "", promptContext: "<x/>",
 };
 
@@ -185,7 +185,7 @@ describe("conversational directives", () => {
 });
 
 const ctxA: IssueContext = {
-  agentSessionId: "a", organizationId: "o", issueId: "i",
+  agentSessionId: "a", organizationId: "o", issueId: "i", teamId: "team_1",
   title: "Title A", description: "Desc A", comment: "", promptContext: "",
 };
 const ctxB: IssueContext = { ...ctxA, title: "Different title", description: "Different desc" };
@@ -264,7 +264,7 @@ describe("turn caps and unified tools", () => {
 });
 
 const hctx: IssueContext = {
-  agentSessionId: "as_hist", organizationId: "org", issueId: "iss",
+  agentSessionId: "as_hist", organizationId: "org", issueId: "iss", teamId: "team_1",
   title: "t", description: "d", comment: "", promptContext: "",
 };
 const HISTORY = "Conversation from prior sessions on this issue (oldest first):\n\n**Human:** hi";

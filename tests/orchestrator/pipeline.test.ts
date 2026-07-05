@@ -50,6 +50,7 @@ function ctxFor(id: string): IssueContext {
     agentSessionId: id,
     organizationId: "org",
     issueId: "iss",
+    teamId: "team_1",
     title: "t",
     description: "d",
     comment: "",
@@ -399,7 +400,7 @@ describe("onCreated resume", () => {
       result: { kind: "result", subtype: "success", text: "https://github.com/o/r/pull/5", costUsd: 0.4, sessionId: "s", usage: {}, numTurns: 3 },
     });
 
-    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_R", title: "T", description: "D", comment: "", promptContext: "" });
+    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_R", teamId: "team_1", title: "T", description: "D", comment: "", promptContext: "" });
 
     // it did NOT run a plan phase; it went straight to implement and finished
     expect(log.join("\n")).not.toMatch(/drafting a plan|Reading the codebase/i);
@@ -416,7 +417,7 @@ describe("onCreated resume", () => {
 
     const log: string[] = [];
     const orch = makeOrchWithFakeSandbox(store, log, {});
-    await orch.onCreated({ agentSessionId: "as_new2", organizationId: "o", issueId: "iss_P", title: "T", description: "D", comment: "", promptContext: "" });
+    await orch.onCreated({ agentSessionId: "as_new2", organizationId: "o", issueId: "iss_P", teamId: "team_1", title: "T", description: "D", comment: "", promptContext: "" });
 
     expect(store.get("as_new2")?.phase).toBe("await_approval");
     expect(store.get("as_new2")?.plan).toContain("tweak");
@@ -437,7 +438,7 @@ describe("onCreated resume", () => {
     const createSpy = vi.spyOn(Sandbox, "create").mockRejectedValue(new Error("should not create a sandbox"));
     const orch = new Orchestrator({ targetRepo: "o/r" } as Config, store, () => fakeActs(log));
 
-    await orch.onCreated({ agentSessionId: "as_new_fr", organizationId: "o", issueId: "iss_FR", title: "T", description: "D", comment: "", promptContext: "" });
+    await orch.onCreated({ agentSessionId: "as_new_fr", organizationId: "o", issueId: "iss_FR", teamId: "team_1", title: "T", description: "D", comment: "", promptContext: "" });
 
     expect(createSpy).not.toHaveBeenCalled(); // never implemented
     expect(store.get("as_new_fr")?.phase).toBe("await_approval");
@@ -458,7 +459,7 @@ describe("onCreated resume", () => {
 
     const log: string[] = [];
     const orch = makeOrchWithFakeSandbox(store, log, {});
-    await orch.onCreated({ agentSessionId: "as_new3", organizationId: "o", issueId: "iss_Q", title: "T", description: "D", comment: "", promptContext: "" });
+    await orch.onCreated({ agentSessionId: "as_new3", organizationId: "o", issueId: "iss_Q", teamId: "team_1", title: "T", description: "D", comment: "", promptContext: "" });
 
     expect(store.get("as_old")?.phase).toBe("done");
     expect(store.get("as_old")?.sandboxId).toBeNull();
@@ -480,7 +481,7 @@ describe("onCreated resume", () => {
     const orch = new Orchestrator({ targetRepo: "o/r" } as Config, store, () => fakeActs(log));
     vi.spyOn(orch, "hasLive").mockImplementation((id: string) => id === "as_old");
 
-    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_L", title: "T", description: "D", comment: "", promptContext: "" });
+    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_L", teamId: "team_1", title: "T", description: "D", comment: "", promptContext: "" });
 
     expect(createSpy).not.toHaveBeenCalled(); // no #runImplement side effects
     expect(log.some((l) => l.startsWith("response:"))).toBe(true); // 10s rule: an activity was posted
@@ -500,7 +501,7 @@ describe("onCreated resume", () => {
 
     const log: string[] = [];
     const orch = makeOrchWithFakeSandbox(store, log, {});
-    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_V", title: "T", description: "D", comment: "", promptContext: "" });
+    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_V", teamId: "team_1", title: "T", description: "D", comment: "", promptContext: "" });
 
     expect(log.join("\n")).not.toMatch(/drafting a plan|Reading the codebase/i); // no re-plan
     expect(store.get("as_new")?.phase).toBe("done");
@@ -521,7 +522,7 @@ describe("onCreated resume", () => {
 
     const log: string[] = [];
     const orch = makeOrchWithFakeSandbox(store, log, {});
-    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_D", title: "T", description: "D", comment: "", promptContext: "" });
+    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_D", teamId: "team_1", title: "T", description: "D", comment: "", promptContext: "" });
 
     expect(store.get("as_new")?.plan).toContain("done");
     expect(store.get("as_new")?.branch).toBe("develop");
@@ -544,7 +545,7 @@ describe("onCreated resume", () => {
     const orch = makeOrchWithFakeSandbox(store, log, {
       result: { kind: "result", subtype: "success", text: "https://github.com/o/r/pull/7", costUsd: 0.1, sessionId: "s", usage: {}, numTurns: 1 },
     });
-    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_T", title: "T", description: "D", comment: "", promptContext: "" });
+    await orch.onCreated({ agentSessionId: "as_new", organizationId: "o", issueId: "iss_T", teamId: "team_1", title: "T", description: "D", comment: "", promptContext: "" });
 
     expect(store.get("as_old")?.phase).toBe("done");
     expect(store.get("as_old")?.sandboxId).toBeNull();
