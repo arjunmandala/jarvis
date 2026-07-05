@@ -298,6 +298,20 @@ describe("AgentTask.images", () => {
   });
 });
 
+describe("images threaded through every task builder", () => {
+  const images = [{ mediaType: "image/png", data: "xyz" }];
+
+  it("reviseTask accepts images", () => {
+    expect(reviseTask(ctx, "plan", "feedback", undefined, undefined, images).images).toEqual(images);
+  });
+  it("implementTask accepts images", () => {
+    expect(implementTask(ctx, "## Plan", undefined, undefined, undefined, images).images).toEqual(images);
+  });
+  it("chatTask accepts images", () => {
+    expect(chatTask(ctx, undefined, undefined, images).images).toEqual(images);
+  });
+});
+
 describe("parseDecomposition", () => {
   it("parses a numbered Decomposition: list", () => {
     const text =

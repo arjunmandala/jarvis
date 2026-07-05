@@ -162,6 +162,7 @@ export function reviseTask(
   feedback: string,
   repoMap?: string,
   history?: string,
+  images?: AgentTask["images"],
 ): AgentTask {
   return {
     goal:
@@ -177,6 +178,7 @@ export function reviseTask(
     maxTurns: 25,
     maxBudgetUsd: 2,
     effort: "medium",
+    images,
   };
 }
 
@@ -226,6 +228,7 @@ export function implementTask(
   repoMap?: string,
   workBranch?: string,
   history?: string,
+  images?: AgentTask["images"],
 ): AgentTask {
   const route = routeImplement(approvedPlan);
   const branchBlock = workBranch
@@ -252,6 +255,7 @@ export function implementTask(
     maxTurns: 120,
     maxBudgetUsd: route.maxBudgetUsd,
     effort: route.effort,
+    images,
   };
 }
 
@@ -339,7 +343,7 @@ const CHAT_APPEND =
   TOOLING_APPEND +
   CONVERSE_APPEND;
 
-export function chatTask(ctx: IssueContext, repoMap?: string, history?: string): AgentTask {
+export function chatTask(ctx: IssueContext, repoMap?: string, history?: string, images?: AgentTask["images"]): AgentTask {
   return {
     goal: `Answer the human's question about this issue and the repository.\n\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}`,
     cwd: REPO_DIR,
@@ -349,5 +353,6 @@ export function chatTask(ctx: IssueContext, repoMap?: string, history?: string):
     maxTurns: 15,
     maxBudgetUsd: 1,
     effort: "medium",
+    images,
   };
 }

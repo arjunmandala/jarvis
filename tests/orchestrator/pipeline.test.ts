@@ -381,7 +381,7 @@ function makeOrchWithFakeSandbox(
     kill: async () => undefined,
   };
   vi.spyOn(Sandbox, "create").mockResolvedValue(fakeSbx as unknown as Sandbox);
-  return new Orchestrator({ targetRepo: "o/r" } as Config, store, () => fakeActs(log));
+  return new Orchestrator({ targetRepo: "o/r", linear: { accessToken: "" } } as Config, store, () => fakeActs(log));
 }
 
 describe("onCreated resume", () => {

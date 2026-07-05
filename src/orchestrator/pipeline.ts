@@ -10,6 +10,7 @@ import type { AgentTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
 import { prepareHistory, type ThreadFetcher } from "../history/history.ts";
 import { classifyIntent } from "../agent/classify.ts";
+import { fetchImageAttachments } from "../linear/attachments.ts";
 
 // Phase 4.1: surface the run's dollar cost inline in the Linear activity when
 // the result carries one; omitted (not "$n/a") when unknown.
@@ -163,6 +164,16 @@ export class Orchestrator {
     const seed = (issueId ?? agentSessionId).replace(/[^A-Za-z0-9._-]/g, "-").replace(/^-+|-+$/g, "");
     const candidate = `jarvis/${seed || agentSessionId}`;
     return isValidBranchName(candidate) ? candidate : `jarvis/${agentSessionId}`;
+  }
+
+  // Pulls any Linear-hosted screenshot images out of the issue description,
+  // latest comment, and prior-session history text, and downloads them. Advisory:
+  // any failure inside fetchImageAttachments is already swallowed there — this
+  // wrapper exists so every call site has one line, not a try/catch each.
+  async #extractImages(ctx: IssueContext, history?: string): Promise<AgentTask["images"]> {
+    const text = `${ctx.description}\n${ctx.comment}\n${history ?? ""}`;
+    const images = await fetchImageAttachments(this.#config.linear.accessToken, text);
+    return images.length > 0 ? images : undefined;
   }
 
   #record(runId: number | null, e: JarvisEvent): void {
@@ -381,7 +392,8 @@ export class Orchestrator {
       const history = await this.#timed(ctx.agentSessionId, "history", () =>
         prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
       );
-      return this.#trackedRun(ctx.agentSessionId, "chat", sbx, chatTask(ctx, map, history), acts);
+      const images = await this.#extractImages(ctx, history);
+      return this.#trackedRun(ctx.agentSessionId, "chat", sbx, chatTask(ctx, map, history, images), acts);
     });
 
     this.#store.setSandbox(ctx.agentSessionId, null);
@@ -452,7 +464,8 @@ export class Orchestrator {
       const history = await this.#timed(ctx.agentSessionId, "history", () =>
         prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
       );
-      return this.#trackedRun(ctx.agentSessionId, "plan", sbx, planTask(ctx, map, history), acts);
+      const images = await this.#extractImages(ctx, history);
+      return this.#trackedRun(ctx.agentSessionId, "plan", sbx, planTask(ctx, map, history, images), acts);
     });
 
     if (cloneFailed) {
@@ -553,7 +566,8 @@ export class Orchestrator {
         const history = await this.#timed(ctx.agentSessionId, "history", () =>
           prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
         );
-        return this.#trackedRun(ctx.agentSessionId, "revise", sbx, reviseTask(ctx, plan, replyText, map, history), acts);
+        const images = await this.#extractImages(ctx, history);
+        return this.#trackedRun(ctx.agentSessionId, "revise", sbx, reviseTask(ctx, plan, replyText, map, history, images), acts);
       });
 
       await this.#finishPlan(ctx.agentSessionId, acts, result);
@@ -588,7 +602,8 @@ export class Orchestrator {
       const history = await this.#timed(ctx.agentSessionId, "history", () =>
         prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
       );
-      const r = await this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map, workBranch, history), acts);
+      const images = await this.#extractImages(ctx, history);
+      const r = await this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map, workBranch, history, images), acts);
       // Persist the PR URL BEFORE self-review: the review run deletes and
       // rewrites RESULT_FILE, so a restart (or stop) during self-review would
       // otherwise lose the PR — or worse, reconcile would recover the review
