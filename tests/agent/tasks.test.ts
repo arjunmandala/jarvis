@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planTask, implementTask, mapTask, reviseTask, reviewTask } from "../../src/agent/tasks.ts";
+import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask } from "../../src/agent/tasks.ts";
 import type { IssueContext } from "../../src/linear/context.ts";
 
 const ctx: IssueContext = {
@@ -286,5 +286,33 @@ describe("history injection", () => {
     expect(planTask(hctx, undefined, HISTORY).systemAppend).toBe(planTask(hctx).systemAppend);
     expect(implementTask(hctx, "Type: chore\nScope: small\nplan", undefined, undefined, HISTORY).systemAppend)
       .toBe(implementTask(hctx, "Type: chore\nScope: small\nplan").systemAppend);
+  });
+});
+
+describe("chatTask", () => {
+  it("is read-only: no Edit/Write/Bash", () => {
+    const t = chatTask(ctx);
+    expect(t.allowedTools).toEqual(expect.arrayContaining(["Read", "Glob", "Grep", "mcp__serena"]));
+    expect(t.allowedTools).not.toContain("Edit");
+    expect(t.allowedTools).not.toContain("Write");
+    expect(t.allowedTools).not.toContain("Bash");
+  });
+
+  it("has a tighter turn/budget cap than planTask", () => {
+    const t = chatTask(ctx);
+    expect(t.maxTurns).toBeLessThan(25);
+    expect(t.maxBudgetUsd).toBeLessThanOrEqual(1);
+  });
+
+  it("includes the issue in the goal and injects the repo map when provided", () => {
+    const t = chatTask(ctx, "MAP");
+    expect(t.goal).toContain(ctx.title);
+    expect(t.goal).toContain("MAP");
+  });
+
+  it("tells the model its final message is posted verbatim as the answer", () => {
+    const t = chatTask(ctx);
+    expect(t.systemAppend).toMatch(/FINAL message/);
+    expect(t.systemAppend).toMatch(/READ-ONLY/i);
   });
 });

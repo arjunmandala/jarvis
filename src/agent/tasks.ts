@@ -287,3 +287,27 @@ export function mapTask(): AgentTask {
     effort: "low", // one-time factual file/module listing; cached and reused
   };
 }
+
+const CHAT_APPEND =
+  "You are Jarvis, answering a question about this Linear issue and its codebase. You are a READ-ONLY " +
+  "assistant for this task — you have no Edit/Write/Bash tools here, so answer using Read/Glob/Grep and " +
+  "the serena tools only.\n\n" +
+  "Answer directly and concisely, grounded in the actual repo. If the question is really a request for a " +
+  "code change, say so plainly and note that you'll plan and implement it if they explicitly ask for the " +
+  "change — do not attempt any change in this task.\n\n" +
+  "Your FINAL message must be the complete answer — it is posted verbatim as your reply." +
+  TOOLING_APPEND +
+  CONVERSE_APPEND;
+
+export function chatTask(ctx: IssueContext, repoMap?: string, history?: string): AgentTask {
+  return {
+    goal: `Answer the human's question about this issue and the repository.\n\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}`,
+    cwd: REPO_DIR,
+    model: "claude-sonnet-5",
+    systemAppend: CHAT_APPEND,
+    allowedTools: ["Read", "Glob", "Grep", "mcp__serena"],
+    maxTurns: 15,
+    maxBudgetUsd: 1,
+    effort: "medium",
+  };
+}
