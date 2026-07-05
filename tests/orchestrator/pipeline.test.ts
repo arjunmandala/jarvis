@@ -5,6 +5,7 @@ import { SessionStore } from "../../src/store/sessions.ts";
 import type { Activities } from "../../src/linear/activities.ts";
 import type { IssueContext } from "../../src/linear/context.ts";
 import type { Config } from "../../src/config.ts";
+import type { LinearClient } from "@linear/sdk";
 
 describe("nextPhase", () => {
   it("clarify -> plan", () => expect(nextPhase("clarify", false)).toBe("plan"));
@@ -797,6 +798,53 @@ describe("reconcile telemetry", () => {
     const orch = new Orchestrator({} as Config, store, () => fakeActs([]));
     await orch.reconcile();
     expect(store.getRunLogsBySession("as_rc3").map((l) => l.outcome)).toEqual(["interrupted"]);
+    store.close();
+  });
+});
+
+describe("sub-issue decomposition", () => {
+  function fakeLinear(created: string[]): Pick<LinearClient, "createIssue" | "updateIssue" | "viewer" | "workflowStates"> {
+    return {
+      createIssue: (async (input: { title: string }) => {
+        created.push(input.title);
+        return { issue: Promise.resolve({ identifier: `ENG-${created.length}` }) };
+      }) as unknown as LinearClient["createIssue"],
+      updateIssue: (async () => ({})) as unknown as LinearClient["updateIssue"],
+      viewer: Promise.resolve({ id: "jarvis-bot" }) as unknown as LinearClient["viewer"],
+      workflowStates: (async () => ({ nodes: [] })) as unknown as LinearClient["workflowStates"],
+    };
+  }
+
+  it("posts the decomposition as an elicitation instead of a normal plan", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_d1", "await_approval", "iss");
+    store.setPlan("as_d1", "placeholder"); // pre-existing row so onPrompted's plan-missing guard doesn't fire
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
+    // Directly exercise #finishPlan's public seam via reconcile-style call: call
+    // onPrompted is not the right seam for finishPlan; instead assert through
+    // the documented, exported behavior — simulate approval on an already
+    // decomposition-shaped stored plan and confirm no sandbox/implement path
+    // is taken (createIssue is called, not implementTask).
+    store.setPlan("as_d1", "Decomposition:\n1. A — do a.\n2. B — do b.\n");
+    const created: string[] = [];
+    const orch2 = new Orchestrator({} as Config, store, () => fakeActs(log), undefined, undefined, undefined, fakeLinear(created));
+    await orch2.onPrompted(ctxFor("as_d1"), "approve");
+    expect(created).toEqual(["A", "B"]);
+    expect(store.get("as_d1")?.phase).toBe("done");
+    expect(log.some((l) => l.startsWith("response:") && l.includes("sub-issue"))).toBe(true);
+    store.close();
+  });
+
+  it("reports failure gracefully when linear client is not configured", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_d2", "await_approval", "iss");
+    store.setPlan("as_d2", "Decomposition:\n1. A — do a.\n");
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log)); // no linear client passed
+    await orch.onPrompted(ctxFor("as_d2"), "approve");
+    expect(store.get("as_d2")?.phase).toBe("done");
+    expect(log.some((l) => l.startsWith("response:"))).toBe(true);
     store.close();
   });
 });

@@ -20,6 +20,7 @@ export function makeServer(config: Config): Hono {
     makePlanFetcher(config.linear.accessToken),
     undefined, // connect: default real e2b reconnect
     makeThreadFetcher(config.linear.accessToken),
+    linear,
   );
 
   // Boot reconciliation: recover or fail-loud every session left in-flight by a

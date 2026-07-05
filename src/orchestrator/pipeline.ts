@@ -11,6 +11,13 @@ import type { JarvisEvent } from "../agent/events.ts";
 import { prepareHistory, type ThreadFetcher } from "../history/history.ts";
 import { classifyIntent } from "../agent/classify.ts";
 import { fetchImageAttachments } from "../linear/attachments.ts";
+import type { LinearClient } from "@linear/sdk";
+import { parseDecomposition } from "../agent/tasks.ts";
+
+// The subset of LinearClient the orchestrator needs for sub-issue creation
+// (Task 9) and workflow-state moves (Task 11-12) — kept narrow so tests can
+// fake it without the real SDK.
+export type OrchestratorLinear = Pick<LinearClient, "createIssue" | "updateIssue" | "viewer" | "workflowStates">;
 
 // Phase 4.1: surface the run's dollar cost inline in the Linear activity when
 // the result carries one; omitted (not "$n/a") when unknown.
@@ -112,6 +119,8 @@ export class Orchestrator {
   #fetchPlan?: (agentSessionId: string) => Promise<string | null>;
   #fetchThread?: ThreadFetcher;
   #connect: (sandboxId: string) => Promise<Reconnected>;
+  #linear?: OrchestratorLinear;
+  #jarvisActorId?: string;
   // Live runs: comments arriving while a run executes are injected into its
   // sandbox (steering). In-memory like the server's inflight set — a restart
   // loses steering ability for that run, which reconcile already fails/recovers.
@@ -128,16 +137,31 @@ export class Orchestrator {
     fetchPlan?: (agentSessionId: string) => Promise<string | null>,
     connect?: (sandboxId: string) => Promise<Reconnected>,
     fetchThread?: ThreadFetcher,
+    linear?: OrchestratorLinear,
   ) {
     this.#config = config;
     this.#store = store;
     this.#makeActs = makeActs;
     this.#fetchPlan = fetchPlan;
     this.#fetchThread = fetchThread;
+    this.#linear = linear;
     // Default: a real e2b reconnect. Tests inject a fake so nothing touches e2b/network.
     this.#connect =
       connect ??
       ((sandboxId) => Sandbox.connect(sandboxId, { apiKey: this.#config.e2bApiKey }) as Promise<Reconnected>);
+  }
+
+  async #getJarvisActorId(): Promise<string | undefined> {
+    if (this.#jarvisActorId) return this.#jarvisActorId;
+    if (!this.#linear) return undefined;
+    try {
+      const viewer = await this.#linear.viewer;
+      this.#jarvisActorId = viewer.id;
+      return viewer.id;
+    } catch (err) {
+      console.error(`[decompose] fetching Jarvis's own actor id failed (advisory): ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
   }
 
   // sessionId opts the sandbox lifecycle into timing telemetry (session_events);
@@ -492,7 +516,52 @@ export class Orchestrator {
     }
     this.#store.setPlan(agentSessionId, plan);
     this.#store.setPhase(agentSessionId, "await_approval");
+    const decomposition = parseDecomposition(plan);
+    if (decomposition) {
+      const list = decomposition.map((d, i) => `${i + 1}. **${d.title}** — ${d.description}`).join("\n");
+      await acts.elicitation(
+        `This issue looks too big for one PR. I'd split it into:\n\n${list}${APPROVAL_FOOTER}${costLine(result)}`,
+      );
+      return;
+    }
     await acts.elicitation(`${plan}${APPROVAL_FOOTER}${costLine(result)}`);
+  }
+
+  // Approval-gated: nothing is created in Linear until a human approves the
+  // decomposition (same posture as plan approval). Each created sub-issue is
+  // self-assigned, which fires its own AgentSessionEvent webhook and runs the
+  // normal pipeline independently — no new orchestration needed for the children.
+  async #createSubIssues(ctx: IssueContext, acts: Activities, items: { title: string; description: string }[]): Promise<void> {
+    console.log(`[phase] ${ctx.agentSessionId} approved decomposition — creating ${items.length} sub-issue(s)`);
+    if (!this.#linear || !ctx.teamId) {
+      console.error(`[decompose] ${ctx.agentSessionId} no linear client or teamId — can't create sub-issues`);
+      this.#store.setPhase(ctx.agentSessionId, "done");
+      await acts.response("I approved the split but couldn't create the sub-issues in Linear (missing team context). Please split it manually.");
+      return;
+    }
+    const assigneeId = await this.#getJarvisActorId();
+    const created: string[] = [];
+    for (const item of items) {
+      try {
+        const payload = await this.#linear.createIssue({
+          parentId: ctx.issueId ?? undefined,
+          teamId: ctx.teamId,
+          title: item.title,
+          description: item.description,
+          assigneeId,
+        });
+        const issue = await payload.issue;
+        created.push(issue?.identifier ?? item.title);
+      } catch (err) {
+        console.error(`[decompose] ${ctx.agentSessionId} createIssue failed for "${item.title}": ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    this.#store.setPhase(ctx.agentSessionId, "done");
+    await acts.response(
+      created.length > 0
+        ? `Created ${created.length} sub-issue(s): ${created.join(", ")}. I'll pick each one up as it's assigned to me.`
+        : "I approved the split but couldn't create the sub-issues in Linear — check my permissions and try again.",
+    );
   }
 
   // prompted: a reply arrived while awaiting approval.
@@ -574,6 +643,11 @@ export class Orchestrator {
       return;
     }
 
+    const decomposition = parseDecomposition(plan);
+    if (decomposition) {
+      await this.#createSubIssues(ctx, acts, decomposition);
+      return;
+    }
     await acts.thought("Approved — implementing in a sandbox now.");
     await this.#runImplement(ctx, acts, plan, row.branch, this.#workBranchFor(ctx.issueId, ctx.agentSessionId));
     return;
