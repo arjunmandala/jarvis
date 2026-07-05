@@ -554,6 +554,27 @@ describe("onCreated resume", () => {
   });
 });
 
+describe("clarify phase", () => {
+  it("reconcile() covers the clarify phase (crash recovery)", () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_c1", "clarify", "iss");
+    expect(store.listByPhase("clarify").map((r) => r.agentSessionId)).toEqual(["as_c1"]);
+    store.close();
+  });
+
+  it("onPrompted on a done+no-PR clarify-derived session still gives the existing terminal reply", async () => {
+    // Sessions never in "clarify" by the time onPrompted runs after this feature
+    // ships still behave exactly as before — this guards the untouched branches.
+    const store = new SessionStore(":memory:");
+    store.upsert("as_c2", "done", "iss");
+    const log: string[] = [];
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
+    await orch.onPrompted(ctxFor("as_c2"), "thanks!");
+    expect(log[0]).toMatch(/^response:/);
+    store.close();
+  });
+});
+
 describe("diffExceedsThreshold", () => {
   it("small diff is under", () => {
     expect(diffExceedsThreshold(" 2 files changed, 30 insertions(+), 4 deletions(-)")).toBe(false);

@@ -5,10 +5,11 @@ import type { IssueContext } from "../linear/context.ts";
 import { APPROVAL_FOOTER, isValidBranchName } from "../linear/context.ts";
 import { withSandbox, cloneRepo, runAgent, watchDetached, injectMessage, runCommand, REPO_DIR, type AgentSandbox } from "../sandbox/session.ts";
 import { Sandbox } from "e2b";
-import { planTask, implementTask, mapTask, reviseTask, reviewTask } from "../agent/tasks.ts";
+import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask } from "../agent/tasks.ts";
 import type { AgentTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
 import { prepareHistory, type ThreadFetcher } from "../history/history.ts";
+import { classifyIntent } from "../agent/classify.ts";
 
 // Phase 4.1: surface the run's dollar cost inline in the Linear activity when
 // the result carries one; omitted (not "$n/a") when unknown.
@@ -349,8 +350,72 @@ export class Orchestrator {
       }
     }
 
+    const intent = await classifyIntent(this.#config.anthropicApiKey, `${ctx.title}\n\n${ctx.description}\n\n${ctx.comment}`);
+    if (intent === "chat") {
+      await this.#runChat(ctx, acts, null);
+      return;
+    }
     this.#store.upsert(ctx.agentSessionId, "plan", ctx.issueId);
     await this.#runPlan(ctx, acts, null);
+  }
+
+  // Called from onCreated/onClarifyPrompted: clone -> answer -> post as response.
+  // Stays in phase "clarify" on both success and failure — a chat thread is meant
+  // to stay conversational; unlike plan/implement, a failed answer is retried by
+  // simply replying again, never wedged into "error".
+  async #runChat(ctx: IssueContext, acts: Activities, branch: string | null): Promise<void> {
+    console.log(`[phase] ${ctx.agentSessionId} clarify: answering`);
+    await acts.thought("Reading the codebase to answer…");
+
+    let cloneFailed = false;
+    const result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
+      this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
+      try {
+        await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), branch);
+      } catch (err) {
+        cloneFailed = true;
+        console.error(`[phase] ${ctx.agentSessionId} chat clone failed: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+      const map = this.#store.getRepoMap(this.#config.targetRepo);
+      const history = await this.#timed(ctx.agentSessionId, "history", () =>
+        prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
+      );
+      return this.#trackedRun(ctx.agentSessionId, "chat", sbx, chatTask(ctx, map, history), acts);
+    });
+
+    this.#store.setSandbox(ctx.agentSessionId, null);
+    if (cloneFailed) {
+      console.error(`[phase] ${ctx.agentSessionId} chat clone failed — staying in clarify`);
+      await acts.error("I couldn't clone the repository to answer that. Reply again to retry.").catch(() => undefined);
+      return;
+    }
+    await this.#finishChat(ctx.agentSessionId, acts, result);
+  }
+
+  async #finishChat(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
+    const text = result?.kind === "result" && result.text ? result.text.trim() : "";
+    if (!text) {
+      console.error(`[phase] ${agentSessionId} chat run produced no answer`);
+      await acts.error("I couldn't answer that — reply again to retry.").catch(() => undefined);
+      return; // stays in "clarify" — retryable by replying again
+    }
+    console.log(`[phase] ${agentSessionId} clarify: answered (${text.length} chars)`);
+    await acts.response(`${text}${costLine(result)}`);
+  }
+
+  // A reply on a session in "clarify": re-classify the new message and either
+  // continue chatting or escalate into the normal plan pipeline — the same
+  // decision onCreated makes for a fresh session.
+  async #onClarifyPrompted(ctx: IssueContext, row: SessionRow, replyText: string, acts: Activities): Promise<void> {
+    const intent = await classifyIntent(this.#config.anthropicApiKey, replyText);
+    if (intent === "change") {
+      console.log(`[phase] ${ctx.agentSessionId} clarify -> plan (escalated by reply)`);
+      this.#store.upsert(ctx.agentSessionId, "plan", ctx.issueId);
+      await this.#runPlan(ctx, acts, row.branch);
+      return;
+    }
+    await this.#runChat(ctx, acts, row.branch);
   }
 
   // Called from onCreated: clone -> one-time repo map -> plan.
@@ -423,6 +488,11 @@ export class Orchestrator {
   async onPrompted(ctx: IssueContext, replyText: string): Promise<void> {
     const acts = this.#makeActs(ctx.agentSessionId);
     const row = this.#store.get(ctx.agentSessionId);
+
+    if (row?.phase === "clarify") {
+      await this.#onClarifyPrompted(ctx, row, replyText, acts);
+      return;
+    }
 
     if (!row || row.phase !== "await_approval") {
       // Terminal activities only — a `thought` would leave Linear stuck on "working".
@@ -710,7 +780,7 @@ export class Orchestrator {
   async reconcile(): Promise<void> {
     const bootIso = new Date().toISOString();
     try {
-      const rows = this.#store.listByPhase("plan", "implement", "review");
+      const rows = this.#store.listByPhase("plan", "implement", "review", "clarify");
       if (rows.length > 0) {
         console.log(`[reconcile] ${rows.length} in-flight session(s) to reconcile`);
         await Promise.allSettled(
@@ -719,7 +789,9 @@ export class Orchestrator {
         const acts = this.#makeActs(id);
         // review is advisory: recover to done (retryable by replying), not error
         const fail = (message: string) =>
-          row.phase === "review" ? this.#finishReview(id, acts, null) : this.#failLoud(id, acts, message);
+          row.phase === "review" ? this.#finishReview(id, acts, null)
+          : row.phase === "clarify" ? this.#finishChat(id, acts, null)
+          : this.#failLoud(id, acts, message);
         // implement-phase failures get resume guidance instead of "start over" —
         // Task 4's findResumableByIssue picks this up on the next `created` webhook.
         const failImplement = (why: string) =>
@@ -768,6 +840,8 @@ export class Orchestrator {
               await this.#finishPlan(id, acts, result);
             } else if (row.phase === "review") {
               await this.#finishReview(id, acts, result);
+            } else if (row.phase === "clarify") {
+              await this.#finishChat(id, acts, result);
             } else {
               await this.#finishImplement(id, acts, result);
             }
