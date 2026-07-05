@@ -24,6 +24,12 @@ export function makeServer(config: Config): Hono {
   const onUnauthorized = () => tokenManager.onUnauthorized();
   // A factory, not a static client — every consumer rebuilds against the
   // current token so a rotation is picked up without a restart.
+  // ponytail: the @linear/sdk client (activities, updateIssue, createIssue,
+  // viewer) has no 401->refresh hook, unlike the raw-fetch paths that thread
+  // onUnauthorized through fetchWithAuth. A token revoked before the scheduled
+  // renewal only self-heals when some raw-fetch 401 fires onUnauthorized first.
+  // Acceptable per the plan (safety margin makes live SDK 401s rare); upgrade
+  // path is a generic SDK fetch interceptor if that ever proves optimistic.
   const linearFor = () => makeLinearClient(getToken());
   const webhook = new LinearWebhookClient(config.linear.webhookSecret);
   const handler = webhook.createHandler();

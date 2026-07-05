@@ -47,9 +47,14 @@ runner, and interrupted sessions fail loud instead of recovering.
 - `.env` populated from `.env.example`: Linear OAuth app creds, `ANTHROPIC_API_KEY`,
   `E2B_API_KEY` + `E2B_TEMPLATE` (`jarvis-agent`), `GH_TOKEN`, `TARGET_REPO` (`owner/name`),
   `PUBLIC_BASE_URL`.
-- One-time Linear OAuth capture: visit the registered app's authorize URL → Linear
-  redirects to `/oauth/callback` → the response body shows `LINEAR_ACCESS_TOKEN=...`
-  **once** (never logged) → copy into `.env` → restart.
+- Linear access token: renewed automatically via the `client_credentials` grant
+  (a ~30-day app-actor token) by `LinearTokenManager` (`src/linear/token-manager.ts`)
+  and persisted in SQLite (`oauth_tokens` table) — **not** `.env`. `LINEAR_ACCESS_TOKEN`
+  is an optional bootstrap seed used only for the first run before a token row exists;
+  the token manager renews a day before expiry, retries on a bounded backoff, and forces
+  a refresh on any `401`. Visiting `/oauth/callback` (the registered app's authorize flow)
+  persists the captured token straight to the store and it goes live with no `.env` edit
+  or restart.
 
 ## Architecture
 

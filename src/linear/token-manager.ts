@@ -22,6 +22,13 @@ const DEFAULT_EXPIRES_IN_S = 30 * 24 * 60 * 60;
 // never give up, never crash the process.
 const RETRY_MIN_MS = 5 * 60 * 1000;
 const RETRY_MAX_MS = 60 * 60 * 1000;
+// Floor for the post-success re-arm: if the endpoint ever returns a token whose
+// lifetime is <= the safety margin (or expires_in=0, which bypasses the
+// DEFAULT_EXPIRES_IN_S fallback), the raw delay is 0 and re-arming at it would
+// busy-loop the token endpoint. Floor it so a short-lived token renews at a
+// sane cadence instead of hammering. // ponytail: only bites if Linear changes
+// the client_credentials lifetime; drop if that never happens.
+const MIN_RENEWAL_MS = 5 * 60 * 1000;
 // Node's setTimeout uses a 32-bit signed delay: anything above ~24.8 days
 // overflows and is silently clamped to 1ms (firing immediately). The renewal
 // horizon (~29 days) is well past that, so long delays are scheduled in chunks.
@@ -185,7 +192,7 @@ export class LinearTokenManager {
     try {
       await this.refreshNow();
       this.#retryMs = RETRY_MIN_MS; // reset backoff on success
-      this.#arm(this.#delayUntilRenewalMs());
+      this.#arm(Math.max(this.#delayUntilRenewalMs(), MIN_RENEWAL_MS));
     } catch (err) {
       // Fail loud, keep the stale token live, retry on bounded backoff — never
       // crash and never give up.

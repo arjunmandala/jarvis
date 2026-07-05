@@ -111,6 +111,27 @@ describe("LinearTokenManager — scheduleRenewal", () => {
     mgr.stop();
   });
 
+  it("does not busy-loop when a renewal succeeds with a <=margin lifetime", async () => {
+    vi.useFakeTimers();
+    const store = fakeStore({ accessToken: "t0", refreshToken: null, expiresAt: new Date(Date.now() + 1000).toISOString() });
+    // Endpoint keeps handing back short-lived (1h) tokens — well under the 1-day margin.
+    const fetchImpl = vi.fn(async () => tokenResponse({ access_token: "short", expires_in: 3600 }));
+    const mgr = new LinearTokenManager(store as never, "cid", "csec", undefined, fetchImpl as unknown as typeof fetch);
+    mgr.scheduleRenewal();
+
+    // First renewal fires immediately (already past margin) and succeeds.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // The re-arm is floored, not 0: nothing fires again for a while...
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // ...and it does eventually renew again at the floored cadence (no tight loop).
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    mgr.stop();
+  });
+
   it("retries on a bounded backoff after a failed renewal, without giving up", async () => {
     vi.useFakeTimers();
     const store = fakeStore({ accessToken: "t0", refreshToken: null, expiresAt: new Date(Date.now() + 1000).toISOString() });

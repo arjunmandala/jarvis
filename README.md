@@ -59,7 +59,7 @@ cp .env.example .env
 |---|---|
 | `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET` | Linear OAuth app credentials |
 | `LINEAR_WEBHOOK_SECRET` | verifies inbound Linear webhook signatures |
-| `LINEAR_ACCESS_TOKEN` | app-actor OAuth token, captured once via `/oauth/callback` (see below) |
+| `LINEAR_ACCESS_TOKEN` | *optional* bootstrap seed only; the live app-actor token is renewed automatically and stored in SQLite (see below) |
 | `ANTHROPIC_API_KEY` | Claude Agent SDK calls made inside the sandbox |
 | `E2B_API_KEY` / `E2B_TEMPLATE` | sandbox provisioning (`E2B_TEMPLATE=jarvis-agent`) |
 | `GH_TOKEN` | clone + push + `gh pr create` against `TARGET_REPO` |
@@ -67,14 +67,20 @@ cp .env.example .env
 | `PUBLIC_BASE_URL` | this service's public URL, for the OAuth redirect + webhook delivery |
 | `PORT` | server port (default `3000`) |
 
-## One-time Linear OAuth capture
+## Linear OAuth token — automatic renewal
 
-After registering the Linear app, visit the app's authorize URL to grant it
-access. Linear redirects to `/oauth/callback`, which exchanges the code for
-an access token and displays `LINEAR_ACCESS_TOKEN=...` once in the response
-body — copy that value into `.env` as `LINEAR_ACCESS_TOKEN` and restart the
-server. The token is never written to the server logs, so this response page
-is the only place you can retrieve it.
+The Linear app-actor token is managed automatically. `LinearTokenManager`
+(`src/linear/token-manager.ts`) uses the `client_credentials` grant with your
+`LINEAR_CLIENT_ID`/`LINEAR_CLIENT_SECRET` to mint a ~30-day token, persists it in
+SQLite (`oauth_tokens` table), renews it a day before expiry (retrying on a bounded
+backoff, never crashing), and forces a refresh on any `401`. There is **no** manual
+`.env` copy step and no restart.
+
+`LINEAR_ACCESS_TOKEN` in `.env` is optional — a one-time bootstrap seed used only for
+the very first run before a token row exists. You can also bootstrap by visiting the
+registered app's authorize URL: Linear redirects to `/oauth/callback`, which exchanges
+the code and **persists** the token straight to the store (the response page confirms
+it's saved and live; the token itself is never logged).
 
 ## Deploying runner changes
 
