@@ -402,3 +402,22 @@ describe("finishOpenRun and markInterruptedRuns", () => {
     s.close();
   });
 });
+
+describe("team_states cache", () => {
+  it("round-trips team workflow states", () => {
+    const store = new SessionStore(":memory:");
+    expect(store.getTeamStates("team_1")).toBeUndefined();
+    const states = [{ id: "s1", name: "Todo", type: "unstarted" }, { id: "s2", name: "In Progress", type: "started" }];
+    store.setTeamStates("team_1", states);
+    expect(store.getTeamStates("team_1")).toEqual(states);
+    store.close();
+  });
+
+  it("overwrites on re-set", () => {
+    const store = new SessionStore(":memory:");
+    store.setTeamStates("team_1", [{ id: "s1", name: "Todo", type: "unstarted" }]);
+    store.setTeamStates("team_1", [{ id: "s2", name: "Done", type: "completed" }]);
+    expect(store.getTeamStates("team_1")).toEqual([{ id: "s2", name: "Done", type: "completed" }]);
+    store.close();
+  });
+});

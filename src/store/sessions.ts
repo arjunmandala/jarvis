@@ -2,6 +2,12 @@ import { DatabaseSync } from "node:sqlite";
 
 export type Phase = "clarify" | "plan" | "await_approval" | "implement" | "review" | "done" | "error";
 
+export interface TeamState {
+  id: string;
+  name: string;
+  type: string;
+}
+
 export interface SessionRow {
   agentSessionId: string;
   phase: Phase;
@@ -138,6 +144,13 @@ export class SessionStore {
       ) STRICT
     `);
     this.#db.exec(`CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(agent_session_id)`);
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS team_states (
+        team_id    TEXT PRIMARY KEY,
+        states     TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT
+    `);
   }
 
   getRepoMap(repo: string): string | undefined {
@@ -156,6 +169,24 @@ export class SessionStore {
          DO UPDATE SET map = excluded.map, updated_at = excluded.updated_at`,
       )
       .run(repo, map, new Date().toISOString());
+  }
+
+  getTeamStates(teamId: string): TeamState[] | undefined {
+    const row = this.#db.prepare(`SELECT states FROM team_states WHERE team_id = ?`).get(teamId) as
+      | { states: string }
+      | undefined;
+    return row ? (JSON.parse(row.states) as TeamState[]) : undefined;
+  }
+
+  setTeamStates(teamId: string, states: TeamState[]): void {
+    this.#db
+      .prepare(
+        `INSERT INTO team_states (team_id, states, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(team_id)
+         DO UPDATE SET states = excluded.states, updated_at = excluded.updated_at`,
+      )
+      .run(teamId, JSON.stringify(states), new Date().toISOString());
   }
 
   createRun(
