@@ -1,3 +1,5 @@
+import { fetchWithAuth, type TokenSource } from "./client.ts";
+
 // Screenshots pasted into a Linear comment/description arrive as plain
 // markdown image links pointing at Linear's authenticated upload host, not a
 // separate structured "attachments" field. Both extraction and download live
@@ -24,15 +26,16 @@ export interface ImageAttachment {
 // Advisory end-to-end: a failed or oversized or non-image download is skipped,
 // never thrown — attachments are a bonus, not a run-blocking dependency.
 export async function fetchImageAttachments(
-  accessToken: string,
+  token: TokenSource,
   text: string,
   fetchImpl: typeof fetch = fetch,
+  onUnauthorized?: () => Promise<string>,
 ): Promise<ImageAttachment[]> {
   const urls = extractImageUrls(text);
   const out: ImageAttachment[] = [];
   for (const url of urls) {
     try {
-      const res = await fetchImpl(url, { headers: { authorization: `Bearer ${accessToken}` } });
+      const res = await fetchWithAuth(url, {}, token, fetchImpl, onUnauthorized);
       if (!res.ok) continue;
       const contentType = res.headers.get("content-type") ?? "";
       if (!contentType.startsWith("image/")) continue;

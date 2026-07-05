@@ -1,6 +1,6 @@
 export interface Config {
   port: number;
-  linear: { accessToken: string; webhookSecret: string; clientId: string; clientSecret: string };
+  linear: { accessToken?: string; webhookSecret: string; clientId: string; clientSecret: string };
   anthropicApiKey: string;
   e2bApiKey: string;
   e2bTemplate: string;
@@ -9,8 +9,12 @@ export interface Config {
   publicBaseUrl: string;
 }
 
+// LINEAR_ACCESS_TOKEN is intentionally NOT required: it's an optional bootstrap
+// seed for the very first run before the oauth_tokens row exists. The live token
+// is renewed automatically via client_credentials and persisted in SQLite. See
+// src/linear/token-manager.ts.
 const REQUIRED = [
-  "LINEAR_ACCESS_TOKEN", "LINEAR_WEBHOOK_SECRET", "LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET",
+  "LINEAR_WEBHOOK_SECRET", "LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET",
   "ANTHROPIC_API_KEY", "E2B_API_KEY", "E2B_TEMPLATE", "GH_TOKEN", "TARGET_REPO", "PUBLIC_BASE_URL",
 ] as const;
 
@@ -22,7 +26,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     port: env.PORT ? Number(env.PORT) : 3000,
     linear: {
-      accessToken: env.LINEAR_ACCESS_TOKEN!,
+      accessToken: env.LINEAR_ACCESS_TOKEN,
       webhookSecret: env.LINEAR_WEBHOOK_SECRET!,
       clientId: env.LINEAR_CLIENT_ID!,
       clientSecret: env.LINEAR_CLIENT_SECRET!,

@@ -6,6 +6,38 @@ export function makeLinearClient(accessToken: string): LinearClient {
   return new LinearClient({ accessToken });
 }
 
+// A live access token, either fixed (tests) or resolved per-request from the
+// token manager (production, so a rotation is picked up without rebuilding the
+// consumer).
+export type TokenSource = string | (() => string);
+
+function resolveToken(src: TokenSource): string {
+  return typeof src === "function" ? src() : src;
+}
+
+// Attach a fresh Bearer token to `init` and call `fetchImpl`. On a 401, if an
+// `onUnauthorized` hook is provided, refresh the token and retry once — the
+// automatic-renewal safety margin means this should rarely be needed, but it
+// closes the gap when a token is revoked early.
+export async function fetchWithAuth(
+  url: string,
+  init: RequestInit,
+  token: TokenSource,
+  fetchImpl: typeof fetch,
+  onUnauthorized?: () => Promise<string>,
+): Promise<Response> {
+  const withAuth = (t: string): RequestInit => ({
+    ...init,
+    headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${t}` },
+  });
+  const res = await fetchImpl(url, withAuth(resolveToken(token)));
+  if (res.status === 401 && onUnauthorized) {
+    const fresh = await onUnauthorized();
+    return fetchImpl(url, withAuth(fresh));
+  }
+  return res;
+}
+
 const PLAN_QUERY = `query($id: String!) { agentSession(id: $id) { activities(first: 250) { nodes { content { __typename ... on AgentActivityElicitationContent { body } } } } } }`;
 
 interface ElicitationNode {
@@ -31,19 +63,23 @@ interface PlanQueryResponse {
  * takes the last one, and strips the footer.
  */
 export function makePlanFetcher(
-  accessToken: string,
+  token: TokenSource,
   fetchImpl: typeof fetch = fetch,
+  onUnauthorized?: () => Promise<string>,
 ): (agentSessionId: string) => Promise<string | null> {
   return async (agentSessionId: string): Promise<string | null> => {
     try {
-      const res = await fetchImpl("https://api.linear.app/graphql", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${accessToken}`,
+      const res = await fetchWithAuth(
+        "https://api.linear.app/graphql",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ query: PLAN_QUERY, variables: { id: agentSessionId } }),
         },
-        body: JSON.stringify({ query: PLAN_QUERY, variables: { id: agentSessionId } }),
-      });
+        token,
+        fetchImpl,
+        onUnauthorized,
+      );
       if (!res.ok) return null;
       const json = (await res.json()) as PlanQueryResponse;
       if (json.errors) return null;
@@ -90,19 +126,23 @@ interface ThreadQueryResponse {
  * bigger problems; add cursor paging if one ever hits the cap.
  */
 export function makeThreadFetcher(
-  accessToken: string,
+  token: TokenSource,
   fetchImpl: typeof fetch = fetch,
+  onUnauthorized?: () => Promise<string>,
 ): (agentSessionId: string) => Promise<string | null> {
   return async (agentSessionId: string): Promise<string | null> => {
     try {
-      const res = await fetchImpl("https://api.linear.app/graphql", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${accessToken}`,
+      const res = await fetchWithAuth(
+        "https://api.linear.app/graphql",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ query: THREAD_QUERY, variables: { id: agentSessionId } }),
         },
-        body: JSON.stringify({ query: THREAD_QUERY, variables: { id: agentSessionId } }),
-      });
+        token,
+        fetchImpl,
+        onUnauthorized,
+      );
       if (!res.ok) return null;
       const json = (await res.json()) as ThreadQueryResponse;
       if (json.errors) return null;

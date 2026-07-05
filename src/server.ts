@@ -6,21 +6,37 @@ import { makeLinearClient, makePlanFetcher, makeThreadFetcher } from "./linear/c
 import { makeActivities } from "./linear/activities.ts";
 import { extractContext, promptedBody } from "./linear/context.ts";
 import { Orchestrator } from "./orchestrator/pipeline.ts";
+import { LinearTokenManager } from "./linear/token-manager.ts";
 
 export function makeServer(config: Config): Hono {
   const app = new Hono();
   const store = new SessionStore(process.env.JARVIS_DB ?? "jarvis.db");
-  const linear = makeLinearClient(config.linear.accessToken);
+  // The live Linear token is renewed automatically (client_credentials) and
+  // persisted in SQLite; config.linear.accessToken is only a bootstrap seed.
+  const tokenManager = new LinearTokenManager(
+    store,
+    config.linear.clientId,
+    config.linear.clientSecret,
+    config.linear.accessToken,
+  );
+  tokenManager.scheduleRenewal();
+  const getToken = () => tokenManager.getToken();
+  const onUnauthorized = () => tokenManager.onUnauthorized();
+  // A factory, not a static client — every consumer rebuilds against the
+  // current token so a rotation is picked up without a restart.
+  const linearFor = () => makeLinearClient(getToken());
   const webhook = new LinearWebhookClient(config.linear.webhookSecret);
   const handler = webhook.createHandler();
   const orchestrator = new Orchestrator(
     config,
     store,
-    (id) => makeActivities(linear, id),
-    makePlanFetcher(config.linear.accessToken),
+    (id) => makeActivities(linearFor(), id),
+    makePlanFetcher(getToken, fetch, onUnauthorized),
     undefined, // connect: default real e2b reconnect
-    makeThreadFetcher(config.linear.accessToken),
-    linear,
+    makeThreadFetcher(getToken, fetch, onUnauthorized),
+    linearFor,
+    getToken,
+    onUnauthorized,
   );
 
   // Boot reconciliation: recover or fail-loud every session left in-flight by a
@@ -42,7 +58,7 @@ export function makeServer(config: Config): Hono {
     const action = (payload as { action?: string }).action;
     const ctx = extractContext(payload);
     if (!ctx.agentSessionId) return;
-    const acts = makeActivities(linear, ctx.agentSessionId);
+    const acts = makeActivities(linearFor(), ctx.agentSessionId);
     console.log(`[webhook] AgentSessionEvent action=${action} session=${ctx.agentSessionId} issue=${JSON.stringify(ctx.title)}`);
 
     if (action === "created") {
@@ -135,6 +151,7 @@ export function makeServer(config: Config): Hono {
     });
     const json = (await res.json()) as {
       access_token?: string;
+      refresh_token?: string;
       token_type?: string;
       scope?: string | string[];
       expires_in?: number;
@@ -164,11 +181,25 @@ export function makeServer(config: Config): Hono {
       verify = `FAILED (${e instanceof Error ? e.message : String(e)})`;
     }
     const len = json.access_token.length;
-    console.log(`OAuth token captured: token_type=${json.token_type} scope=${JSON.stringify(json.scope)} expires_in=${json.expires_in} len=${len} verify=${verify}`);
+    // Persist immediately so re-running the install flow "just works" without a
+    // restart or a manual .env edit. Never log the token itself.
+    let persisted = "OK";
+    try {
+      const expiresAt = new Date(Date.now() + (json.expires_in ?? 30 * 24 * 60 * 60) * 1000).toISOString();
+      tokenManager.adopt({
+        accessToken: json.access_token,
+        refreshToken: json.refresh_token ?? null,
+        expiresAt,
+      });
+    } catch (e) {
+      persisted = `FAILED (${e instanceof Error ? e.message : String(e)})`;
+    }
+    console.log(`OAuth token captured: token_type=${json.token_type} scope=${JSON.stringify(json.scope)} expires_in=${json.expires_in} len=${len} verify=${verify} persisted=${persisted}`);
     return c.text(
-      `LINEAR_ACCESS_TOKEN=${json.access_token}\n\n` +
-        `token_type: ${json.token_type}\nscope: ${JSON.stringify(json.scope)}\nexpires_in: ${json.expires_in}\nlength: ${len}\nAPI self-check: ${verify}\n\n` +
-        "Copy the LINEAR_ACCESS_TOKEN line's value (no trailing spaces) into .env, then restart. " +
+      `token_type: ${json.token_type}\nscope: ${JSON.stringify(json.scope)}\nexpires_in: ${json.expires_in}\n` +
+        `length: ${len}\nAPI self-check: ${verify}\npersisted to store: ${persisted}\n\n` +
+        "The token has been saved to the local store and is now live — no .env edit or restart is needed. " +
+        "It renews automatically before it expires (client_credentials). " +
         "If the self-check says OK, the token works.",
     );
   });

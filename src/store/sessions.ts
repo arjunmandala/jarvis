@@ -8,6 +8,14 @@ export interface TeamState {
   type: string;
 }
 
+// A stored OAuth credential (one row per provider). refreshToken is null under
+// the client_credentials grant; expiresAt is an ISO timestamp.
+export interface OAuthToken {
+  accessToken: string;
+  refreshToken: string | null;
+  expiresAt: string;
+}
+
 export interface SessionRow {
   agentSessionId: string;
   phase: Phase;
@@ -151,6 +159,37 @@ export class SessionStore {
         updated_at TEXT NOT NULL
       ) STRICT
     `);
+    // Durable OAuth credentials — the intended secure store for the Linear
+    // access token, replacing the manual LINEAR_ACCESS_TOKEN=.env copy step.
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS oauth_tokens (
+        provider      TEXT PRIMARY KEY,
+        access_token  TEXT NOT NULL,
+        refresh_token TEXT,
+        expires_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL
+      ) STRICT
+    `);
+  }
+
+  getOAuthToken(provider: string): OAuthToken | undefined {
+    const row = this.#db
+      .prepare(`SELECT access_token, refresh_token, expires_at FROM oauth_tokens WHERE provider = ?`)
+      .get(provider) as { access_token: string; refresh_token: string | null; expires_at: string } | undefined;
+    if (!row) return undefined;
+    return { accessToken: row.access_token, refreshToken: row.refresh_token, expiresAt: row.expires_at };
+  }
+
+  setOAuthToken(provider: string, token: OAuthToken): void {
+    this.#db
+      .prepare(
+        `INSERT INTO oauth_tokens (provider, access_token, refresh_token, expires_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(provider)
+         DO UPDATE SET access_token = excluded.access_token, refresh_token = excluded.refresh_token,
+                       expires_at = excluded.expires_at, updated_at = excluded.updated_at`,
+      )
+      .run(provider, token.accessToken, token.refreshToken, token.expiresAt, new Date().toISOString());
   }
 
   getRepoMap(repo: string): string | undefined {

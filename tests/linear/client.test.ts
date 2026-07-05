@@ -90,6 +90,37 @@ describe("makePlanFetcher", () => {
     const fetchPlan = makePlanFetcher("token-123", fetchImpl as unknown as typeof fetch);
     expect(await fetchPlan("as_6")).toBeNull();
   });
+
+  it("on a 401, refreshes the token and retries once with the fresh one", async () => {
+    const plan = "Recovered after refresh.";
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ errors: ["unauthorized"] }, 401))
+      .mockResolvedValueOnce(
+        jsonResponse({ data: { agentSession: { activities: { nodes: [elicitationNode(`${plan}${APPROVAL_FOOTER}`)] } } } }),
+      );
+    const onUnauthorized = vi.fn(async () => "fresh-token");
+    const fetchPlan = makePlanFetcher("stale-token", fetchImpl as unknown as typeof fetch, onUnauthorized);
+    expect(await fetchPlan("as_401")).toBe(plan);
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const calls = fetchImpl.mock.calls as unknown as [string, RequestInit][];
+    const firstAuth = calls[0][1].headers as Record<string, string>;
+    const retryAuth = calls[1][1].headers as Record<string, string>;
+    expect(firstAuth.authorization).toBe("Bearer stale-token");
+    expect(retryAuth.authorization).toBe("Bearer fresh-token");
+  });
+
+  it("accepts a token getter (live token source)", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ data: { agentSession: { activities: { nodes: [] } } } }),
+    );
+    const fetchPlan = makePlanFetcher(() => "getter-token", fetchImpl as unknown as typeof fetch);
+    await fetchPlan("as_g");
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const auth = init.headers as Record<string, string>;
+    expect(auth.authorization).toBe("Bearer getter-token");
+  });
 });
 
 function contentNode(typename: string, body: string) {

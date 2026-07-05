@@ -120,7 +120,12 @@ export class Orchestrator {
   #fetchPlan?: (agentSessionId: string) => Promise<string | null>;
   #fetchThread?: ThreadFetcher;
   #connect: (sandboxId: string) => Promise<Reconnected>;
-  #linear?: OrchestratorLinear;
+  // A factory, not a static client: the OAuth token rotates (auto-renewal), so
+  // each use resolves a fresh LinearClient bound to the current token rather
+  // than holding one built at boot that goes stale on the first rotation.
+  #linearFor?: () => OrchestratorLinear;
+  #getToken: () => string;
+  #onUnauthorized?: () => Promise<string>;
   #jarvisActorId?: string;
   // Live runs: comments arriving while a run executes are injected into its
   // sandbox (steering). In-memory like the server's inflight set — a restart
@@ -138,14 +143,20 @@ export class Orchestrator {
     fetchPlan?: (agentSessionId: string) => Promise<string | null>,
     connect?: (sandboxId: string) => Promise<Reconnected>,
     fetchThread?: ThreadFetcher,
-    linear?: OrchestratorLinear,
+    linearFor?: () => OrchestratorLinear,
+    getToken?: () => string,
+    onUnauthorized?: () => Promise<string>,
   ) {
     this.#config = config;
     this.#store = store;
     this.#makeActs = makeActs;
     this.#fetchPlan = fetchPlan;
     this.#fetchThread = fetchThread;
-    this.#linear = linear;
+    this.#linearFor = linearFor;
+    // Fall back to the bootstrap .env token when no live token source is wired
+    // (tests, and the transitional path before the token manager is threaded).
+    this.#getToken = getToken ?? (() => this.#config.linear.accessToken ?? "");
+    this.#onUnauthorized = onUnauthorized;
     // Default: a real e2b reconnect. Tests inject a fake so nothing touches e2b/network.
     this.#connect =
       connect ??
@@ -154,9 +165,10 @@ export class Orchestrator {
 
   async #getJarvisActorId(): Promise<string | undefined> {
     if (this.#jarvisActorId) return this.#jarvisActorId;
-    if (!this.#linear) return undefined;
+    const linear = this.#linearFor?.();
+    if (!linear) return undefined;
     try {
-      const viewer = await this.#linear.viewer;
+      const viewer = await linear.viewer;
       this.#jarvisActorId = viewer.id;
       return viewer.id;
     } catch (err) {
@@ -195,12 +207,13 @@ export class Orchestrator {
   // teamId, or any API failure just skips — a failed status move never fails
   // or blocks a run.
   async #advanceState(ctx: IssueContext, transition: Transition): Promise<void> {
-    if (!this.#linear || !ctx.issueId || !ctx.teamId) return;
+    const linear = this.#linearFor?.();
+    if (!linear || !ctx.issueId || !ctx.teamId) return;
     try {
-      const states = await fetchTeamStates(this.#linear, this.#store, ctx.teamId);
+      const states = await fetchTeamStates(linear, this.#store, ctx.teamId);
       const stateId = await resolveTargetState(this.#config.anthropicApiKey, states, transition);
       if (!stateId) return;
-      await this.#linear.updateIssue(ctx.issueId, { stateId });
+      await linear.updateIssue(ctx.issueId, { stateId });
     } catch (err) {
       console.error(`[workflow] ${ctx.agentSessionId} advanceState(${transition}) failed (advisory): ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -212,7 +225,7 @@ export class Orchestrator {
   // wrapper exists so every call site has one line, not a try/catch each.
   async #extractImages(ctx: IssueContext, history?: string): Promise<AgentTask["images"]> {
     const text = `${ctx.description}\n${ctx.comment}\n${history ?? ""}`;
-    const images = await fetchImageAttachments(this.#config.linear.accessToken, text);
+    const images = await fetchImageAttachments(this.#getToken, text, fetch, this.#onUnauthorized);
     return images.length > 0 ? images : undefined;
   }
 
@@ -550,7 +563,8 @@ export class Orchestrator {
   // normal pipeline independently — no new orchestration needed for the children.
   async #createSubIssues(ctx: IssueContext, acts: Activities, items: { title: string; description: string }[]): Promise<void> {
     console.log(`[phase] ${ctx.agentSessionId} approved decomposition — creating ${items.length} sub-issue(s)`);
-    if (!this.#linear || !ctx.teamId) {
+    const linear = this.#linearFor?.();
+    if (!linear || !ctx.teamId) {
       console.error(`[decompose] ${ctx.agentSessionId} no linear client or teamId — can't create sub-issues`);
       this.#store.setPhase(ctx.agentSessionId, "done");
       await acts.response("I approved the split but couldn't create the sub-issues in Linear (missing team context). Please split it manually.");
@@ -560,7 +574,7 @@ export class Orchestrator {
     const created: string[] = [];
     for (const item of items) {
       try {
-        const payload = await this.#linear.createIssue({
+        const payload = await linear.createIssue({
           parentId: ctx.issueId ?? undefined,
           teamId: ctx.teamId,
           title: item.title,

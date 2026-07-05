@@ -23,7 +23,16 @@ describe("loadConfig", () => {
   });
 
   it("throws listing every missing var", () => {
-    expect(() => loadConfig({})).toThrowError(/LINEAR_ACCESS_TOKEN/);
+    expect(() => loadConfig({})).toThrowError(/LINEAR_CLIENT_ID/);
     expect(() => loadConfig({})).toThrowError(/TARGET_REPO/);
+  });
+
+  // LINEAR_ACCESS_TOKEN is a bootstrap seed, not required: the live token is
+  // renewed automatically and persisted in SQLite.
+  it("loads without LINEAR_ACCESS_TOKEN (optional bootstrap seed)", () => {
+    const { LINEAR_ACCESS_TOKEN, ...noToken } = full;
+    const c = loadConfig(noToken);
+    expect(c.linear.accessToken).toBeUndefined();
+    expect(c.linear.clientId).toBe("cid");
   });
 });

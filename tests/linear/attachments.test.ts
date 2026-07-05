@@ -66,4 +66,22 @@ describe("fetchImageAttachments", () => {
     expect(await fetchImageAttachments("token-1", "no images here", fetchImpl as unknown as typeof fetch)).toEqual([]);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+
+  it("on a 401, refreshes and retries the download with the fresh token", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("", { status: 401 }))
+      .mockResolvedValueOnce(imgResponse(4));
+    const onUnauthorized = vi.fn(async () => "fresh-token");
+    const out = await fetchImageAttachments(
+      () => "stale-token",
+      "![x](https://uploads.linear.app/a.png)",
+      fetchImpl as unknown as typeof fetch,
+      onUnauthorized,
+    );
+    expect(out).toHaveLength(1);
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    const retryInit = fetchImpl.mock.calls[1][1] as RequestInit;
+    expect(retryInit.headers).toMatchObject({ authorization: "Bearer fresh-token" });
+  });
 });

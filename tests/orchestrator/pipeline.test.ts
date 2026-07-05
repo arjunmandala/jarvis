@@ -845,7 +845,8 @@ describe("sub-issue decomposition", () => {
     // is taken (createIssue is called, not implementTask).
     store.setPlan("as_d1", "Decomposition:\n1. A — do a.\n2. B — do b.\n");
     const created: string[] = [];
-    const orch2 = new Orchestrator({} as Config, store, () => fakeActs(log), undefined, undefined, undefined, fakeLinear(created));
+    const linear = fakeLinear(created);
+    const orch2 = new Orchestrator({} as Config, store, () => fakeActs(log), undefined, undefined, undefined, () => linear);
     await orch2.onPrompted(ctxFor("as_d1"), "approve");
     expect(created).toEqual(["A", "B"]);
     expect(store.get("as_d1")?.phase).toBe("done");

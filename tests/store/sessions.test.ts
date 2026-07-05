@@ -420,4 +420,28 @@ describe("team_states cache", () => {
     expect(store.getTeamStates("team_1")).toEqual([{ id: "s2", name: "Done", type: "completed" }]);
     store.close();
   });
+
+  describe("oauth_tokens", () => {
+    it("returns undefined for an unknown provider", () => {
+      const store = new SessionStore(":memory:");
+      expect(store.getOAuthToken("linear")).toBeUndefined();
+      store.close();
+    });
+
+    it("round-trips a token (with a null refresh token)", () => {
+      const store = new SessionStore(":memory:");
+      const tok = { accessToken: "at1", refreshToken: null, expiresAt: "2026-08-01T00:00:00.000Z" };
+      store.setOAuthToken("linear", tok);
+      expect(store.getOAuthToken("linear")).toEqual(tok);
+      store.close();
+    });
+
+    it("overwrites on re-set (single row per provider)", () => {
+      const store = new SessionStore(":memory:");
+      store.setOAuthToken("linear", { accessToken: "at1", refreshToken: "r1", expiresAt: "2026-08-01T00:00:00.000Z" });
+      store.setOAuthToken("linear", { accessToken: "at2", refreshToken: null, expiresAt: "2026-09-01T00:00:00.000Z" });
+      expect(store.getOAuthToken("linear")).toEqual({ accessToken: "at2", refreshToken: null, expiresAt: "2026-09-01T00:00:00.000Z" });
+      store.close();
+    });
+  });
 });
