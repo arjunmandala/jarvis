@@ -13,6 +13,7 @@ import { classifyIntent } from "../agent/classify.ts";
 import { fetchImageAttachments } from "../linear/attachments.ts";
 import type { LinearClient } from "@linear/sdk";
 import { parseDecomposition } from "../agent/tasks.ts";
+import { fetchTeamStates, resolveTargetState, type Transition } from "../linear/workflow.ts";
 
 // The subset of LinearClient the orchestrator needs for sub-issue creation
 // (Task 9) and workflow-state moves (Task 11-12) — kept narrow so tests can
@@ -188,6 +189,21 @@ export class Orchestrator {
     const seed = (issueId ?? agentSessionId).replace(/[^A-Za-z0-9._-]/g, "-").replace(/^-+|-+$/g, "");
     const candidate = `jarvis/${seed || agentSessionId}`;
     return isValidBranchName(candidate) ? candidate : `jarvis/${agentSessionId}`;
+  }
+
+  // Best-effort issue-status nudge. Advisory end-to-end: no linear client, no
+  // teamId, or any API failure just skips — a failed status move never fails
+  // or blocks a run.
+  async #advanceState(ctx: IssueContext, transition: Transition): Promise<void> {
+    if (!this.#linear || !ctx.issueId || !ctx.teamId) return;
+    try {
+      const states = await fetchTeamStates(this.#linear, this.#store, ctx.teamId);
+      const stateId = await resolveTargetState(this.#config.anthropicApiKey, states, transition);
+      if (!stateId) return;
+      await this.#linear.updateIssue(ctx.issueId, { stateId });
+    } catch (err) {
+      console.error(`[workflow] ${ctx.agentSessionId} advanceState(${transition}) failed (advisory): ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // Pulls any Linear-hosted screenshot images out of the issue description,
@@ -458,6 +474,7 @@ export class Orchestrator {
   async #runPlan(ctx: IssueContext, acts: Activities, branch: string | null): Promise<void> {
     console.log(`[phase] ${ctx.agentSessionId} → plan (cloning + drafting)`);
     await acts.thought("Reading the codebase to draft a plan…");
+    await this.#advanceState(ctx, "plan_start");
 
     let cloneFailed = false;
     const result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
@@ -667,6 +684,7 @@ export class Orchestrator {
     this.#store.setPhase(ctx.agentSessionId, "implement");
     this.#store.setWorkBranch(ctx.agentSessionId, workBranch);
     console.log(`[phase] ${ctx.agentSessionId} → implement (branch ${workBranch})`);
+    await this.#advanceState(ctx, "implement_start");
 
     const map = this.#store.getRepoMap(this.#config.targetRepo);
     let review: string | null = null;
@@ -683,12 +701,15 @@ export class Orchestrator {
       // otherwise lose the PR — or worse, reconcile would recover the review
       // report and feed it to #finishImplement as if it were the PR URL.
       const prText = r?.kind === "result" && r.text ? r.text.trim() : "";
-      if (PR_URL_RE.test(prText)) this.#store.setPrUrl(ctx.agentSessionId, prText);
+      if (PR_URL_RE.test(prText)) {
+        this.#store.setPrUrl(ctx.agentSessionId, prText);
+        await this.#advanceState(ctx, "pr_opened");
+      }
       review = await this.#maybeSelfReview(ctx, sbx, r, plan, map, acts);
       return r;
     });
 
-    await this.#finishImplement(ctx.agentSessionId, acts, result, review);
+    await this.#finishImplement(ctx, acts, result, review);
   }
 
   // A comment arrived while a run is live. stop kills it; anything else is
@@ -722,11 +743,12 @@ export class Orchestrator {
   // Everything after the implement run: post the PR (done) or the failure
   // (error). Called from onPrompted and, after a restart, from reconcile.
   async #finishImplement(
-    agentSessionId: string,
+    ctx: IssueContext,
     acts: Activities,
     result: JarvisEvent | null,
     review: string | null = null,
   ): Promise<void> {
+    const agentSessionId = ctx.agentSessionId;
     // A mid-run "stop" (steer) already closed the session; don't overwrite done
     // with error/await_approval when the killed run's null result lands here.
     if (this.#store.get(agentSessionId)?.phase === "done") return;
@@ -742,6 +764,7 @@ export class Orchestrator {
       console.log(`[phase] ${agentSessionId} → done (PR: ${result.text.slice(0, 100)})`);
       this.#store.setPrUrl(agentSessionId, text);
       if (review) this.#store.setReview(agentSessionId, review);
+      await this.#advanceState(ctx, "done");
       try {
         await acts.response(`Done. PR opened:\n\n${result.text}\n\n_A human review + merge closes this out._${costLine(result)}`);
         if (review) await acts.response(`**Self-review of the diff** (advisory — the PR is unchanged):\n\n${review}`);
@@ -932,7 +955,11 @@ export class Orchestrator {
             } else if (row.phase === "clarify") {
               await this.#finishChat(id, acts, result);
             } else {
-              await this.#finishImplement(id, acts, result);
+              await this.#finishImplement(
+                { agentSessionId: id, organizationId: "", issueId: row.issueId, teamId: null, title: "", description: "", comment: "", promptContext: "" },
+                acts,
+                result,
+              );
             }
           } finally {
             await sbx.kill().catch(() => undefined);
