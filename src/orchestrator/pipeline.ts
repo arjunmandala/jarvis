@@ -898,6 +898,15 @@ export class Orchestrator {
         await Promise.allSettled(
           rows.map(async (row) => {
         const id = row.agentSessionId;
+        // "clarify" is the conversational resting state (set after #runChat
+        // answers a question, sandboxId cleared) — not an interrupted run.
+        // Only a "clarify" row WITH a sandboxId is genuinely in-flight and
+        // needs reconciling; skip the resting ones silently so a restart
+        // doesn't post a false "I couldn't answer that" to every idle chat.
+        if (row.phase === "clarify" && !row.sandboxId) {
+          console.log(`[reconcile] ${id} phase=clarify has no sandboxId — resting conversational state, skipping`);
+          return;
+        }
         const acts = this.#makeActs(id);
         // review is advisory: recover to done (retryable by replying), not error
         const fail = (message: string) =>

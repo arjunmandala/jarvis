@@ -48,6 +48,13 @@ describe("fetchImageAttachments", () => {
     expect(out).toEqual([]);
   });
 
+  it("sanitizes a content-type with parameters down to the bare media type", async () => {
+    const fetchImpl = vi.fn(async () => imgResponse(4, "image/png; charset=binary"));
+    const out = await fetchImageAttachments("token-1", "![x](https://uploads.linear.app/a.png)", fetchImpl as unknown as typeof fetch);
+    expect(out).toHaveLength(1);
+    expect(out[0].mediaType).toBe("image/png");
+  });
+
   it("skips a non-image content-type", async () => {
     const fetchImpl = vi.fn(async () => imgResponse(4, "text/html"));
     const out = await fetchImageAttachments("token-1", "![x](https://uploads.linear.app/a.png)", fetchImpl as unknown as typeof fetch);

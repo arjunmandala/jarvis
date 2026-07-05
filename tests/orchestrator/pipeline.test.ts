@@ -280,6 +280,23 @@ describe("reconcile", () => {
     store.close();
   });
 
+  it("skips an idle clarify row with no sandboxId silently (resting state, not an interrupted run)", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_rc6", "clarify", "iss"); // resting after #runChat answered, no sandboxId
+    const log: string[] = [];
+    let connectCalls = 0;
+    const connect = async () => {
+      connectCalls++;
+      return fakeSandbox(null).sbx;
+    };
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log), undefined, connect);
+    await orch.reconcile();
+    expect(connectCalls).toBe(0);
+    expect(log.length).toBe(0); // no error activity posted
+    expect(store.get("as_rc6")?.phase).toBe("clarify"); // left resting
+    store.close();
+  });
+
   it("on an unrecoverable implement, keeps the plan/work branch and points the user at a cheap resume", async () => {
     const store = new SessionStore(":memory:");
     store.upsert("as_i", "implement", "iss_Z");

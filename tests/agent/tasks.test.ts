@@ -286,6 +286,7 @@ describe("history injection", () => {
     expect(planTask(hctx, undefined, HISTORY).systemAppend).toBe(planTask(hctx).systemAppend);
     expect(implementTask(hctx, "Type: chore\nScope: small\nplan", undefined, undefined, HISTORY).systemAppend)
       .toBe(implementTask(hctx, "Type: chore\nScope: small\nplan").systemAppend);
+    expect(chatTask(hctx, "MAP", HISTORY).systemAppend).toBe(chatTask(hctx).systemAppend);
   });
 });
 

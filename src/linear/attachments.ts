@@ -38,7 +38,10 @@ export async function fetchImageAttachments(
       if (!contentType.startsWith("image/")) continue;
       const buf = await res.arrayBuffer();
       if (buf.byteLength > MAX_IMAGE_BYTES) continue;
-      out.push({ mediaType: contentType, data: Buffer.from(buf).toString("base64") });
+      // Strip any `;`-parameters (e.g. "image/png; charset=binary") — the
+      // Messages API rejects a media_type that isn't a bare mime type.
+      const mediaType = contentType.split(";")[0].trim();
+      out.push({ mediaType, data: Buffer.from(buf).toString("base64") });
     } catch (err) {
       console.error(`[attachments] download failed for ${url} (advisory): ${err instanceof Error ? err.message : String(err)}`);
     }
