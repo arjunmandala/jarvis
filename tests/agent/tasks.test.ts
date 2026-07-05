@@ -289,6 +289,15 @@ describe("history injection", () => {
   });
 });
 
+describe("AgentTask.images", () => {
+  it("planTask accepts an optional images array without altering goal text", () => {
+    const images = [{ mediaType: "image/png", data: "abc123" }];
+    const withImages = planTask(ctx, undefined, undefined, images);
+    expect(withImages.images).toEqual(images);
+    expect(withImages.goal).toBe(planTask(ctx).goal); // goal text is untouched by images
+  });
+});
+
 describe("chatTask", () => {
   it("is read-only: no Edit/Write/Bash", () => {
     const t = chatTask(ctx);

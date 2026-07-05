@@ -15,6 +15,10 @@ export interface AgentTask {
   // bounded tasks (map/review/plan) to cut thinking-token spend and consolidate
   // tool calls — fewer, faster turns also miss the 5-min prompt cache less often.
   effort?: EffortLevel;
+  // Base64 images extracted from Linear attachments (screenshots pasted into the
+  // issue/comments) — passed to the agent's first turn as vision blocks alongside
+  // goal's text. Undefined for tasks with no attachments found.
+  images?: { mediaType: string; data: string }[];
 }
 
 // Appended to both plan and implement system prompts. Fixed text — never fold
@@ -127,7 +131,12 @@ function historyBlock(history?: string): string {
   return `\n\n---\nHistory — prior sessions on this issue:\n${history}`;
 }
 
-export function planTask(ctx: IssueContext, repoMap?: string, history?: string): AgentTask {
+export function planTask(
+  ctx: IssueContext,
+  repoMap?: string,
+  history?: string,
+  images?: AgentTask["images"],
+): AgentTask {
   return {
     goal: `Produce an implementation plan for this issue.\n\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}`,
     cwd: REPO_DIR,
@@ -137,6 +146,7 @@ export function planTask(ctx: IssueContext, repoMap?: string, history?: string):
     maxTurns: 25,
     maxBudgetUsd: 2,
     effort: "medium", // planning is bounded read-only work; `high` over-explores
+    images,
   };
 }
 
