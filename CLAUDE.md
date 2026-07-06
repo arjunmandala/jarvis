@@ -120,6 +120,7 @@ clarify → plan → await_approval ⇄ plan (revision loop, feedback ≠ approv
                                           └─ failure → error
 
 done ⇄ review (reply on a finished session with a PR — report-only, always returns to done)
+    └─ done ⇄ implement (reply parsed as a change request — updates the open PR in place on the existing work branch; questions/review requests take the report-only `review` path)
 ```
 State lives in SQLite (`sessions` table), keyed by Linear's `agentSessionId`. A
 restart loses nothing except live-steering ability for runs that were mid-flight
@@ -154,9 +155,7 @@ Durable state is keyed by **issue**, not by session: `sessions.workBranch` pins 
 deterministic `jarvis/<issueId>` branch (`#workBranchFor`), and `implementTask()`
 checks it out with `git checkout -B <workBranch> origin/<workBranch> || git checkout
 -b <workBranch>`, pushing after each meaningful step (and de-duping an already-open
-PR) instead of pushing once at the end. Combined with `findResumableByIssue`, a run
-that dies mid-implementation — sandbox killed, host restarted, whatever — resumes on
-the next `created` webhook from the saved plan plus whatever was already pushed,
+PR) instead of pushing once at the end. The work branch is pushed to the remote host-side right after clone (via `#pushEmptyBranch`), before the implement agent runs, so a run that dies before its first agent-side push still leaves an assignable branch on the remote. Combined with `findResumableByIssue`, a run that dies mid-implementation — sandbox killed, host restarted, whatever — resumes on the next `created` webhook from the saved plan plus whatever was already pushed,
 rather than re-planning or redoing finished work.
 
 Serena MCP (`ide-assistant` context) is registered by `runner.mjs` when
