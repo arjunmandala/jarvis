@@ -866,3 +866,33 @@ describe("sub-issue decomposition", () => {
     store.close();
   });
 });
+
+describe("early work-branch push", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("pushes the work branch to origin before the implement agent runs", async () => {
+    const store = new SessionStore(":memory:");
+    // A prior approved-but-died attempt so onCreated resumes straight to implement.
+    store.upsert("as_old", "error", "iss_B");
+    store.setPlan("as_old", "Type: feature\nScope: large\n\n## Plan\n- build it");
+    store.setBranch("as_old", "main");
+    store.setWorkBranch("as_old", "jarvis/iss_B");
+
+    const commands: string[] = [];
+    const fakeSbx = {
+      sandboxId: "fake-sbx",
+      files: { read: async () => JSON.stringify({ kind: "result", subtype: "success", text: "https://github.com/o/r/pull/9", costUsd: 0.1, sessionId: "s", usage: {}, numTurns: 2 }), write: async () => undefined },
+      commands: { run: async (cmd: string) => { commands.push(cmd); return { exitCode: 0, stdout: "", stderr: "" }; }, list: async () => [] },
+      kill: async () => undefined,
+    };
+    vi.spyOn(Sandbox, "create").mockResolvedValue(fakeSbx as unknown as Sandbox);
+    const log: string[] = [];
+    const orch = new Orchestrator({ targetRepo: "o/r", linear: { accessToken: "" } } as Config, store, () => fakeActs(log));
+
+    await orch.onCreated({ agentSessionId: "as_newB", organizationId: "o", issueId: "iss_B", teamId: "team_1", title: "T", description: "D", comment: "", promptContext: "" });
+
+    // The branch was pushed to origin before/around the agent run.
+    expect(commands.some((c) => /git push -u origin jarvis\/iss_B/.test(c))).toBe(true);
+    store.close();
+  });
+});

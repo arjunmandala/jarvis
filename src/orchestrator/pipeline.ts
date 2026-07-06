@@ -684,6 +684,31 @@ export class Orchestrator {
     return;
   }
 
+  // Make the work branch visible on the remote immediately — before the agent
+  // writes anything — so a run that dies early (credits, crash, kill) leaves an
+  // assignable branch on GitHub instead of nothing. Prefers the remote branch if
+  // a prior run already pushed real commits (fast-forward no-op); else creates it
+  // at the base HEAD (no work yet — just a visible, assignable ref).
+  // ponytail: advisory — a push failure (offline, perms, non-fast-forward) only
+  // logs; the implement agent's own per-step `git push` retries. workBranch is
+  // pre-validated by #workBranchFor (isValidBranchName), so shell interpolation is safe.
+  async #pushEmptyBranch(sbx: Sandbox, workBranch: string): Promise<void> {
+    const cmd =
+      `cd ${REPO_DIR} && ` +
+      `(git checkout -B ${workBranch} origin/${workBranch} 2>/dev/null || git checkout -B ${workBranch}) && ` +
+      `git push -u origin ${workBranch}`;
+    try {
+      const r = await runCommand(sbx, cmd);
+      if (r.exitCode !== 0) {
+        console.error(`[branch] ${workBranch} initial push failed (advisory): ${r.stderr.slice(0, 200)}`);
+      } else {
+        console.log(`[branch] ${workBranch} pushed to remote before implement`);
+      }
+    } catch (err) {
+      console.error(`[branch] ${workBranch} initial push threw (advisory): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // Clone the base branch, run implement against the pinned work branch, self-review,
   // finish. Shared by onPrompted (fresh approval) and onCreated (resume). Preserves
   // the approved-path semantics verbatim — the only additions are pinning the work
@@ -705,6 +730,7 @@ export class Orchestrator {
     const result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
       this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
       await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), baseBranch);
+      await this.#pushEmptyBranch(sbx, workBranch);
       const history = await this.#timed(ctx.agentSessionId, "history", () =>
         prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
       );
