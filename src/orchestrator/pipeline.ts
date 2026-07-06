@@ -3,7 +3,7 @@ import type { SessionStore, Phase, SessionRow, RunFinish } from "../store/sessio
 import type { Activities } from "../linear/activities.ts";
 import type { IssueContext } from "../linear/context.ts";
 import { APPROVAL_FOOTER, isValidBranchName } from "../linear/context.ts";
-import { withSandbox, cloneRepo, runAgent, watchDetached, injectMessage, runCommand, REPO_DIR, type AgentSandbox } from "../sandbox/session.ts";
+import { withSandbox, cloneRepo, runAgent, watchDetached, injectMessage, runCommand, redactSecret, REPO_DIR, type AgentSandbox } from "../sandbox/session.ts";
 import { Sandbox } from "e2b";
 import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask } from "../agent/tasks.ts";
 import type { AgentTask } from "../agent/tasks.ts";
@@ -700,12 +700,13 @@ export class Orchestrator {
     try {
       const r = await runCommand(sbx, cmd);
       if (r.exitCode !== 0) {
-        console.error(`[branch] ${workBranch} initial push failed (advisory): ${r.stderr.slice(0, 200)}`);
+        console.error(`[branch] ${workBranch} initial push failed (advisory): ${redactSecret(r.stderr.slice(0, 200), this.#config.ghToken)}`);
       } else {
         console.log(`[branch] ${workBranch} pushed to remote before implement`);
       }
     } catch (err) {
-      console.error(`[branch] ${workBranch} initial push threw (advisory): ${err instanceof Error ? err.message : String(err)}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[branch] ${workBranch} initial push threw (advisory): ${redactSecret(msg, this.#config.ghToken)}`);
     }
   }
 
