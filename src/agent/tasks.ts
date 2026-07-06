@@ -91,9 +91,17 @@ const IMPLEMENT_APPEND =
   "directly with a focused test proving the change. Do NOT dispatch subagents, do NOT re-plan or " +
   "brainstorm, do NOT run requesting-code-review, and do NOT start the app unless the VERIFICATION rule " +
   "below requires it — a passing focused test plus the repo's test suite is sufficient proof.\n\n" +
-  "LARGER WORK: use subagent-driven-development and test-driven-development while coding, and " +
-  "systematic-debugging on any failure. Then use requesting-code-review on the diff and fix what it finds " +
-  "before opening the PR.\n\n" +
+  // ponytail: this is the substitute for superpowers' SessionStart hook, which primes
+  // reflexive skill use on the human's own machine but isn't replicated in the sandbox
+  // (skills are installed and registered — verified — but the base agent won't reach for
+  // them unprompted). Ceiling: still a soft instruction, so model selection is a strong
+  // tendency, not a guarantee; wire the SDK `agents` option in runner.mjs if you need one.
+  "LARGER WORK: actually INVOKE these skills with the Skill tool (do not merely recall them) — " +
+  "subagent-driven-development and test-driven-development while coding, and systematic-debugging on any " +
+  "failure. When subagent-driven-development dispatches implementer/reviewer subagents, ALWAYS pass an " +
+  "explicit `model` on each dispatch per its Model Selection guidance — pick the cheapest model that fits " +
+  "the subtask; an omitted model silently inherits this session's model, which defeats the point. Then " +
+  "invoke requesting-code-review on the diff and fix what it finds before opening the PR.\n\n" +
   "ENVIRONMENT: you run as root in a disposable sandbox. If a tool, runtime, or system dependency the repo " +
   "needs is missing (python, a compiler, a CLI), install it yourself with `apt-get install -y <pkg>` (or pip/npm " +
   "as appropriate) and continue — never stop or report failure because something isn't installed.\n\n" +
