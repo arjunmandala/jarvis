@@ -26,6 +26,7 @@ export interface SessionRow {
   sandboxId: string | null;
   prUrl: string | null;
   review: string | null;
+  sdkSessionId: string | null;
   updatedAt: string;
 }
 
@@ -91,6 +92,9 @@ export class SessionStore {
     }
     if (!cols.some((c) => c.name === "work_branch")) {
       this.#db.exec(`ALTER TABLE sessions ADD COLUMN work_branch TEXT`);
+    }
+    if (!cols.some((c) => c.name === "sdk_session_id")) {
+      this.#db.exec(`ALTER TABLE sessions ADD COLUMN sdk_session_id TEXT`);
     }
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS repo_maps (
@@ -370,10 +374,20 @@ export class SessionStore {
       .run(workBranch, new Date().toISOString(), agentSessionId);
   }
 
+  // Forward seam for cross-turn SDK transcript resume (option C). Captured from
+  // each turn's result; not yet used for memory — the Linear thread is canonical.
+  // ponytail: stored, not resumed. Upgrade path: ship the SDK transcript off-box
+  // and pass `resume` in the next turn's options.
+  setSdkSessionId(agentSessionId: string, sdkSessionId: string): void {
+    this.#db
+      .prepare(`UPDATE sessions SET sdk_session_id = ?, updated_at = ? WHERE agent_session_id = ?`)
+      .run(sdkSessionId, new Date().toISOString(), agentSessionId);
+  }
+
   get(agentSessionId: string): SessionRow | undefined {
     const row = this.#db
       .prepare(
-        `SELECT agent_session_id, phase, issue_id, branch, work_branch, plan, sandbox_id, pr_url, review, updated_at FROM sessions WHERE agent_session_id = ?`,
+        `SELECT agent_session_id, phase, issue_id, branch, work_branch, plan, sandbox_id, pr_url, review, sdk_session_id, updated_at FROM sessions WHERE agent_session_id = ?`,
       )
       .get(agentSessionId) as
       | {
@@ -386,6 +400,7 @@ export class SessionStore {
           sandbox_id: string | null;
           pr_url: string | null;
           review: string | null;
+          sdk_session_id: string | null;
           updated_at: string;
         }
       | undefined;
@@ -400,6 +415,7 @@ export class SessionStore {
       sandboxId: row.sandbox_id,
       prUrl: row.pr_url,
       review: row.review,
+      sdkSessionId: row.sdk_session_id,
       updatedAt: row.updated_at,
     };
   }
@@ -408,7 +424,7 @@ export class SessionStore {
     const placeholders = phases.map(() => "?").join(", ");
     const rows = this.#db
       .prepare(
-        `SELECT agent_session_id, phase, issue_id, branch, work_branch, plan, sandbox_id, pr_url, review, updated_at FROM sessions WHERE phase IN (${placeholders})`,
+        `SELECT agent_session_id, phase, issue_id, branch, work_branch, plan, sandbox_id, pr_url, review, sdk_session_id, updated_at FROM sessions WHERE phase IN (${placeholders})`,
       )
       .all(...phases) as {
       agent_session_id: string;
@@ -420,6 +436,7 @@ export class SessionStore {
       sandbox_id: string | null;
       pr_url: string | null;
       review: string | null;
+      sdk_session_id: string | null;
       updated_at: string;
     }[];
     return rows.map((row) => ({
@@ -432,6 +449,7 @@ export class SessionStore {
       sandboxId: row.sandbox_id,
       prUrl: row.pr_url,
       review: row.review,
+      sdkSessionId: row.sdk_session_id,
       updatedAt: row.updated_at,
     }));
   }
@@ -442,7 +460,7 @@ export class SessionStore {
   findResumableByIssue(issueId: string, excludeSessionId: string): SessionRow | null {
     const row = this.#db
       .prepare(
-        `SELECT agent_session_id, phase, issue_id, branch, work_branch, plan, sandbox_id, pr_url, review, updated_at
+        `SELECT agent_session_id, phase, issue_id, branch, work_branch, plan, sandbox_id, pr_url, review, sdk_session_id, updated_at
          FROM sessions
          WHERE issue_id = ? AND agent_session_id != ?
            AND plan IS NOT NULL AND TRIM(plan) != ''
@@ -452,14 +470,16 @@ export class SessionStore {
       | {
           agent_session_id: string; phase: Phase; issue_id: string | null;
           branch: string | null; work_branch: string | null; plan: string | null;
-          sandbox_id: string | null; pr_url: string | null; review: string | null; updated_at: string;
+          sandbox_id: string | null; pr_url: string | null; review: string | null;
+          sdk_session_id: string | null; updated_at: string;
         }
       | undefined;
     if (!row) return null;
     return {
       agentSessionId: row.agent_session_id, phase: row.phase, issueId: row.issue_id,
       branch: row.branch, workBranch: row.work_branch, plan: row.plan,
-      sandboxId: row.sandbox_id, prUrl: row.pr_url, review: row.review, updatedAt: row.updated_at,
+      sandboxId: row.sandbox_id, prUrl: row.pr_url, review: row.review,
+      sdkSessionId: row.sdk_session_id, updatedAt: row.updated_at,
     };
   }
 
@@ -470,18 +490,20 @@ export class SessionStore {
   listByIssue(issueId: string): SessionRow[] {
     const rows = this.#db
       .prepare(
-        `SELECT agent_session_id, phase, issue_id, branch, work_branch, plan, sandbox_id, pr_url, review, updated_at
+        `SELECT agent_session_id, phase, issue_id, branch, work_branch, plan, sandbox_id, pr_url, review, sdk_session_id, updated_at
          FROM sessions WHERE issue_id = ? ORDER BY rowid ASC`,
       )
       .all(issueId) as {
       agent_session_id: string; phase: Phase; issue_id: string | null;
       branch: string | null; work_branch: string | null; plan: string | null;
-      sandbox_id: string | null; pr_url: string | null; review: string | null; updated_at: string;
+      sandbox_id: string | null; pr_url: string | null; review: string | null;
+      sdk_session_id: string | null; updated_at: string;
     }[];
     return rows.map((row) => ({
       agentSessionId: row.agent_session_id, phase: row.phase, issueId: row.issue_id,
       branch: row.branch, workBranch: row.work_branch, plan: row.plan,
-      sandboxId: row.sandbox_id, prUrl: row.pr_url, review: row.review, updatedAt: row.updated_at,
+      sandboxId: row.sandbox_id, prUrl: row.pr_url, review: row.review,
+      sdkSessionId: row.sdk_session_id, updatedAt: row.updated_at,
     }));
   }
 
