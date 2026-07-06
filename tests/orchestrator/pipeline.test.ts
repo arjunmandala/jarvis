@@ -262,6 +262,32 @@ describe("reconcile", () => {
     store.close();
   });
 
+  // Finding 1: a restart mid-Tier-1-converse must recover through the SAME
+  // ACTION-parsing dispatch a live run uses — a recovered `ACTION: plan` must
+  // store the plan (not drop it) and the literal tag must never leak to Linear.
+  it("(e) recovers a clarify converse run: ACTION: plan is stored and the tag is not leaked", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_rc7", "clarify", "iss");
+    store.setSandbox("as_rc7", "sbx-conv");
+    const log: string[] = [];
+    const resultEvent = JSON.stringify({
+      kind: "result",
+      subtype: "success",
+      text: "ACTION: plan\nType: chore\nScope: small\n\n## Plan\n- do it",
+      costUsd: 0.05,
+      sessionId: null,
+    });
+    const { sbx } = fakeSandbox(resultEvent);
+    const connect = async () => sbx;
+    const orch = new Orchestrator({} as Config, store, () => fakeActs(log), undefined, connect);
+    await orch.reconcile();
+    expect(store.get("as_rc7")?.plan).toContain("do it");
+    expect(store.get("as_rc7")?.phase).toBe("clarify"); // dispatchConverse's `plan` action doesn't gate approval
+    expect(log.some((l) => l.startsWith("response:"))).toBe(true);
+    expect(log.some((l) => l.includes("ACTION:"))).toBe(false); // the raw tag must never leak
+    store.close();
+  });
+
   it("on an unrecoverable implement, keeps the plan/work branch and points the user at a cheap resume", async () => {
     const store = new SessionStore(":memory:");
     store.upsert("as_i", "implement", "iss_Z");
@@ -358,6 +384,35 @@ describe("onCreated converse (two-tier)", () => {
     expect((Sandbox.create as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(0);
     expect(store.get("s1")?.phase).toBe("clarify");
     expect(store.get("s1")?.sdkSessionId).toBe("sdk-1");
+    store.close();
+  });
+
+  // Finding 2: the need_repo escalation — Tier 0 says it needs the repo, Tier 1
+  // runs sandboxed, and its ACTION-tagged result is dispatched — had no coverage.
+  it("escalates to a Tier 1 sandbox run when the host turn returns need_repo, and dispatches its ACTION: plan", async () => {
+    const store = new SessionStore(":memory:");
+    const log: string[] = [];
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      runHostTurn: async () => ({
+        text: "ACTION: need_repo\nLet me pull up the code…",
+        action: "need_repo",
+        body: "Let me pull up the code…",
+        sessionId: null,
+        costUsd: null,
+      }),
+      result: {
+        kind: "result", subtype: "success",
+        text: "ACTION: plan\nType: feature\nScope: small\n\n## Plan\n- add the endpoint",
+        costUsd: 0.2, sessionId: "sdk-need-repo", usage: {}, numTurns: 5,
+      },
+    });
+    await orch.onCreated(ctxFor("s1", "Add an endpoint that lists widgets"));
+    // Unlike the Tier-0-only test above, a sandbox WAS created for the escalation.
+    expect((Sandbox.create as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(1);
+    expect(store.get("s1")?.plan).toContain("add the endpoint");
+    expect(log.some((l) => l.startsWith("response:") && l.includes("add the endpoint"))).toBe(true);
+    expect(log.some((l) => l.includes("ACTION:"))).toBe(false); // tag not leaked
+    expect(store.get("s1")?.phase).toBe("clarify");
     store.close();
   });
 });

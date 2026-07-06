@@ -409,25 +409,15 @@ export class Orchestrator {
   }
 
   // One conversational turn. Tier 0 runs on the host (no sandbox); if the agent
-  // needs the repo (need_repo) or we already know it will (forceRepo), run Tier 1
-  // in a sandbox. Both tiers converge on #dispatchConverse below.
-  async #runConverseTurn(ctx: IssueContext, acts: Activities, userMessage: string, forceRepo = false): Promise<void> {
+  // needs the repo (need_repo), run Tier 1 in a sandbox. Both tiers converge on
+  // #dispatchConverse below.
+  async #runConverseTurn(ctx: IssueContext, acts: Activities, userMessage: string): Promise<void> {
+    await acts.thought("Thinking…");
     const history = ctx.issueId ? await this.#fetchThread?.(ctx.issueId).catch(() => "") : "";
-
-    let action: HostTurnResult["action"];
-    let body: string;
-    let sessionId: string | null = null;
-    let costUsd: number | null = null;
-
-    if (!forceRepo) {
-      await acts.thought("Thinking…");
-      const r: HostTurnResult = await this.#runHostTurn({
-        apiKey: this.#config.anthropicApiKey, ctx, userMessage, history: history || undefined,
-      });
-      ({ action, body, sessionId, costUsd } = r);
-    } else {
-      action = "need_repo"; body = ""; // jump straight to Tier 1
-    }
+    const r: HostTurnResult = await this.#runHostTurn({
+      apiKey: this.#config.anthropicApiKey, ctx, userMessage, history: history || undefined,
+    });
+    const { action, body, sessionId, costUsd } = r;
 
     if (action === "need_repo") {
       await acts.thought("Let me pull up the code…");
@@ -481,21 +471,24 @@ export class Orchestrator {
   }
 
   // #runChat (the old clarify-phase runner) was deleted as dead code in Task 7 —
-  // chat now runs through #runConverseTurn/converseTask. #finishChat below is
-  // still live: reconcile() replays a recovered Tier 1 converse-sandbox result
-  // through it for any "clarify"-phase row. Stays in phase "clarify" on both
-  // success and failure — a chat thread is meant to stay conversational; unlike
-  // plan/implement, a failed answer is retried by simply replying again, never
-  // wedged into "error".
-  async #finishChat(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
+  // chat now runs through #runConverseTurn/converseTask. #finishConverse below is
+  // reconcile()'s counterpart: it replays a recovered Tier 1 converse-sandbox
+  // result through the SAME ACTION-parsing dispatch a live run uses (mirroring
+  // #runConverseTurn's need_repo branch), so a recovered `ACTION: plan`/
+  // `ACTION: implement` isn't silently dropped and a recovered `ACTION: reply`
+  // doesn't leak its raw tag to the human. Stays in phase "clarify" on failure —
+  // a chat thread is meant to stay conversational; unlike plan/implement, a
+  // failed answer is retried by simply replying again, never wedged into "error".
+  async #finishConverse(ctx: IssueContext, acts: Activities, result: JarvisEvent | null): Promise<void> {
     const text = result?.kind === "result" && result.text ? result.text.trim() : "";
     if (!text) {
-      console.error(`[phase] ${agentSessionId} chat run produced no answer`);
+      console.error(`[phase] ${ctx.agentSessionId} converse run produced no answer`);
       await acts.error("I couldn't answer that — reply again to retry.").catch(() => undefined);
       return; // stays in "clarify" — retryable by replying again
     }
-    console.log(`[phase] ${agentSessionId} clarify: answered (${text.length} chars)`);
-    await acts.response(`${text}${costLine(result)}`);
+    console.log(`[phase] ${ctx.agentSessionId} clarify: recovered converse result (${text.length} chars)`);
+    const parsed = parseConverseAction(text);
+    await this.#dispatchConverse(ctx, acts, parsed.action, parsed.body, costLine(result));
   }
 
   // Called from onCreated: clone -> one-time repo map -> plan.
@@ -955,10 +948,14 @@ export class Orchestrator {
           return;
         }
         const acts = this.#makeActs(id);
+        // Synthetic context for the two finish paths that need one (#finishConverse
+        // dispatches through #dispatchConverse, #finishImplement reads issueId) —
+        // reconcile only persists issueId, not the rest of the webhook payload.
+        const ctx: IssueContext = { agentSessionId: id, organizationId: "", issueId: row.issueId, teamId: null, title: "", description: "", comment: "", promptContext: "" };
         // review is advisory: recover to done (retryable by replying), not error
         const fail = (message: string) =>
           row.phase === "review" ? this.#finishReview(id, acts, null)
-          : row.phase === "clarify" ? this.#finishChat(id, acts, null)
+          : row.phase === "clarify" ? this.#finishConverse(ctx, acts, null)
           : this.#failLoud(id, acts, message);
         // implement-phase failures get resume guidance instead of "start over" —
         // Task 4's findResumableByIssue picks this up on the next `created` webhook.
@@ -1009,13 +1006,9 @@ export class Orchestrator {
             } else if (row.phase === "review") {
               await this.#finishReview(id, acts, result);
             } else if (row.phase === "clarify") {
-              await this.#finishChat(id, acts, result);
+              await this.#finishConverse(ctx, acts, result);
             } else {
-              await this.#finishImplement(
-                { agentSessionId: id, organizationId: "", issueId: row.issueId, teamId: null, title: "", description: "", comment: "", promptContext: "" },
-                acts,
-                result,
-              );
+              await this.#finishImplement(ctx, acts, result);
             }
           } finally {
             await sbx.kill().catch(() => undefined);
