@@ -1,6 +1,7 @@
 import type { IssueContext } from "../linear/context.ts";
 import { REPO_DIR } from "../sandbox/session.ts";
 import type { AgentTask } from "./tasks.ts";
+import { ALL_REPO_TOOLS, TOOLING_APPEND, issueBlock, repoMapBlock, historyBlock } from "./tasks.ts";
 
 export type ConverseAction = "reply" | "need_repo" | "plan" | "implement" | "stop";
 const VERBS = new Set<ConverseAction>(["reply", "need_repo", "plan", "implement", "stop"]);
@@ -38,3 +39,30 @@ export const CONVERSE_APPEND =
   "acknowledgement. Only use this when they actually said go; if you are unsure, use `reply` and ask.\n" +
   "- `stop` — the human asked to stop. The rest is a brief sign-off.\n\n" +
   "Never emit `implement` unless a plan has already been posted in this conversation and the human agreed to it.";
+
+const CONVERSE_SYSTEM = CONVERSE_APPEND + TOOLING_APPEND;
+
+// Tier 1: runs in the sandbox with the full repo toolset. Used when a host turn
+// emitted `need_repo`, or directly for the very first turn on a change request.
+export function converseTask(
+  ctx: IssueContext,
+  userMessage: string,
+  repoMap?: string,
+  history?: string,
+  images?: AgentTask["images"],
+): AgentTask {
+  return {
+    goal:
+      `The human's latest message:\n${userMessage}\n\n` +
+      `Respond per the PROTOCOL. Read the repo as needed to answer, plan, or decide.\n\n` +
+      `---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}`,
+    cwd: REPO_DIR,
+    model: "claude-sonnet-5",
+    systemAppend: CONVERSE_SYSTEM,
+    allowedTools: ALL_REPO_TOOLS,
+    maxTurns: 30,
+    maxBudgetUsd: 2,
+    effort: "medium",
+    images,
+  };
+}

@@ -1,5 +1,11 @@
 import { test, expect } from "vitest";
-import { parseConverseAction } from "../../src/agent/converse.ts";
+import { parseConverseAction, converseTask } from "../../src/agent/converse.ts";
+import type { IssueContext } from "../../src/linear/context.ts";
+
+const ctx: IssueContext = {
+  agentSessionId: "s1", organizationId: "o", issueId: "i", teamId: "t",
+  title: "Add rate limiter", description: "limit to 100/min", comment: "", promptContext: "",
+};
 
 test("parses a leading ACTION tag and returns the body", () => {
   const r = parseConverseAction("ACTION: implement\nGo ahead and build it.");
@@ -21,4 +27,13 @@ test("unknown verb defaults to reply and keeps the full text", () => {
   const r = parseConverseAction("ACTION: ponder\nhmm");
   expect(r.action).toBe("reply");
   expect(r.body).toBe("ACTION: ponder\nhmm");
+});
+
+test("converseTask carries full repo tools and the user message in the goal", () => {
+  const t = converseTask(ctx, "why token bucket?");
+  expect(t.allowedTools).toContain("Bash");
+  expect(t.allowedTools).toContain("mcp__serena");
+  expect(t.goal).toContain("why token bucket?");
+  expect(t.systemAppend).toContain("ACTION:");
+  expect(t.cwd).toBe("/home/user/repo");
 });
