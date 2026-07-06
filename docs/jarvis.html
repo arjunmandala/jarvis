@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Jarvis: a coding agent that lives in Linear. An issue goes in, a pull request comes out: planned, built, and tested in a disposable sandbox, gated twice by a human.">
+<meta name="theme-color" content="#000000">
+<meta property="og:title" content="JARVIS — Agent Specification">
+<meta property="og:description" content="An issue goes in. A pull request comes out. Nothing ships without a human saying yes. Twice.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23000'/%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%23fff' stroke-width='1.5' stroke-dasharray='10 5'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23fff'/%3E%3C/svg%3E">
+<title>JARVIS — Agent Specification</title>
+<style>
+  :root {
+    --ink: #000000;
+    --panel: rgba(255,255,255,.028);
+    --paper: #ffffff;
+    --dim: rgba(255,255,255,.72);
+    --faint: rgba(255,255,255,.56); /* smallest body-adjacent text: keeps ≥4.5:1 on #000 */
+    --ghost: rgba(255,255,255,.28); /* decorative glyphs only, never running text */
+    --rule: rgba(255,255,255,.13);
+    --glow: rgba(255,255,255,.55);
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, Menlo, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--ink); scroll-behavior: smooth; }
+  body {
+    background: var(--ink);
+    color: var(--dim);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.65;
+    margin: 0;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: #fff; color: #000; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 2; }
+
+  /* ================= ambient HUD layers ================= */
+  .hud-grid {
+    position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background-image:
+      linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: radial-gradient(ellipse 90% 70% at 50% 18%, #000 0%, transparent 78%);
+    -webkit-mask-image: radial-gradient(ellipse 90% 70% at 50% 18%, #000 0%, transparent 78%);
+  }
+  .hud-glow {
+    position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background: radial-gradient(ellipse 60% 42% at 50% 0%, rgba(255,255,255,.07), transparent 70%);
+  }
+  .scanline {
+    position: fixed; top: 0; left: 0; right: 0; height: 120px; z-index: 1; pointer-events: none;
+    background: linear-gradient(180deg, transparent, rgba(255,255,255,.045), transparent);
+    transform: translateY(-140px);
+    animation: scan 9s linear infinite;
+    opacity: .8;
+    will-change: transform;
+  }
+  @keyframes scan { to { transform: translateY(110vh); } }
+
+  /* faint film grain via repeating conic noise substitute */
+  .vignette {
+    position: fixed; inset: 0; z-index: 1; pointer-events: none;
+    background: radial-gradient(ellipse 120% 100% at 50% 50%, transparent 60%, rgba(0,0,0,.55) 100%);
+  }
+
+  /* ================= boot overlay ================= */
+  #boot {
+    position: fixed; inset: 0; z-index: 100; background: #000;
+    display: flex; align-items: center; justify-content: center;
+    transition: opacity .8s ease, visibility .8s;
+    cursor: pointer;
+  }
+  #boot.gone { opacity: 0; visibility: hidden; }
+  .boot-inner { font-family: var(--mono); font-size: .8rem; letter-spacing: .1em; color: var(--dim); width: min(480px, 86vw); }
+  .boot-line { opacity: 0; margin: 6px 0; white-space: nowrap; overflow: hidden; }
+  .boot-line.on { opacity: 1; }
+  .boot-line .ok { color: #fff; }
+  .boot-title {
+    font-size: clamp(1.6rem, 5vw, 2.4rem); letter-spacing: .55em; color: #fff; font-weight: 600;
+    margin-bottom: 26px; opacity: 0;
+    text-shadow: 0 0 24px rgba(255,255,255,.5);
+  }
+  .boot-title.on { opacity: 1; transition: opacity 1.2s ease; }
+  .boot-skip { position: absolute; bottom: 28px; left: 0; right: 0; text-align: center; font-family: var(--mono); font-size: .65rem; letter-spacing: .3em; color: var(--faint); text-transform: uppercase; }
+
+  /* ================= type ================= */
+  h1, h2, h3 { color: var(--paper); text-wrap: balance; margin: 0; }
+  h1 { font-size: clamp(2.6rem, 7vw, 5.4rem); font-weight: 800; letter-spacing: -0.035em; line-height: 1.02; }
+  h2 { font-size: clamp(1.5rem, 3vw, 2.15rem); font-weight: 750; letter-spacing: -0.02em; line-height: 1.15; }
+  h3 { font-size: 1.05rem; font-weight: 650; }
+  p { max-width: 66ch; margin: 0; text-wrap: pretty; }
+  strong { color: var(--paper); font-weight: 650; }
+  code {
+    font-family: var(--mono); font-size: .84em; color: var(--paper);
+    background: rgba(255,255,255,.07); padding: .12em .38em; border-radius: 3px;
+  }
+  .eyebrow {
+    font-family: var(--mono); font-size: .72rem; letter-spacing: .26em;
+    text-transform: uppercase; color: var(--faint);
+    display: inline-flex; align-items: center; gap: 12px;
+  }
+  .eyebrow::before { content: "▸"; color: var(--paper); font-size: .6rem; }
+
+  /* ================= status bar ================= */
+  .statusbar {
+    position: sticky; top: 0; z-index: 50;
+    backdrop-filter: blur(8px);
+    background: rgba(0,0,0,.72);
+    border-bottom: 1px solid var(--rule);
+  }
+  .statusbar-in {
+    max-width: 1040px; margin: 0 auto; padding: 12px 24px;
+    display: flex; justify-content: space-between; align-items: center; gap: 16px;
+    font-family: var(--mono); font-size: .68rem; letter-spacing: .18em; text-transform: uppercase;
+  }
+  .statusbar .name { color: var(--paper); font-weight: 600; letter-spacing: .42em; text-shadow: 0 0 16px rgba(255,255,255,.45); }
+  .statusbar .sys { color: var(--faint); display: flex; gap: 22px; }
+  .statusbar .sys .live { color: var(--paper); }
+  .blink { animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (max-width: 640px) { .statusbar .sys span:nth-child(2) { display: none; } }
+
+  /* ================= hero + reactor ================= */
+  .hero {
+    padding: 110px 0 80px; position: relative;
+    display: grid; grid-template-columns: 1fr auto; gap: 40px; align-items: center;
+  }
+  .hero-copy { display: flex; flex-direction: column; gap: 26px; position: relative; z-index: 2; }
+  .hero .sub { font-size: 1.2rem; color: var(--dim); max-width: 52ch; line-height: 1.55; }
+  .hero .sub em { font-style: normal; color: var(--paper); }
+  .typed-caret::after { content: "▍"; color: #fff; animation: blink 1s steps(1) infinite; font-weight: 400; }
+
+  .reactor { width: clamp(180px, 24vw, 300px); height: clamp(180px, 24vw, 300px); position: relative; flex: none; }
+  .reactor svg { width: 100%; height: 100%; overflow: visible; }
+  .ring { fill: none; stroke: rgba(255,255,255,.5); transform-origin: 50% 50%; }
+  .ring-a { animation: spin 22s linear infinite; }
+  .ring-b { animation: spin-rev 14s linear infinite; stroke: rgba(255,255,255,.32); }
+  .ring-c { animation: spin 8s linear infinite; stroke: rgba(255,255,255,.7); }
+  .ring-d { animation: spin-rev 40s linear infinite; stroke: rgba(255,255,255,.16); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes spin-rev { to { transform: rotate(-360deg); } }
+  .core {
+    fill: #fff;
+    animation: corepulse 3.2s ease-in-out infinite;
+  }
+  @keyframes corepulse {
+    0%, 100% { opacity: .85; r: 7; }
+    50% { opacity: 1; r: 9; }
+  }
+  .reactor::after {
+    content: ""; position: absolute; inset: 18%;
+    border-radius: 50%;
+    box-shadow: 0 0 90px 18px rgba(255,255,255,.13), inset 0 0 40px rgba(255,255,255,.08);
+    pointer-events: none;
+  }
+  @media (max-width: 760px) {
+    .hero { grid-template-columns: 1fr; }
+    .reactor { order: -1; margin: 0 auto; }
+  }
+
+  /* ================= scroll reveal ================= */
+  .rv { opacity: 0; transform: translateY(26px); transition: opacity .8s ease, transform .8s cubic-bezier(.2,.7,.2,1); }
+  .rv.in { opacity: 1; transform: none; }
+  .rv-d1 { transition-delay: .08s; } .rv-d2 { transition-delay: .16s; } .rv-d3 { transition-delay: .24s; }
+
+  /* ================= sections ================= */
+  section { padding: 96px 0 0; }
+  .section-head { display: flex; flex-direction: column; gap: 14px; margin-bottom: 42px; }
+  .section-head::before { content: ""; display: block; width: 44px; height: 1px; background: linear-gradient(90deg, #fff, transparent); }
+
+  /* ================= HUD panel primitive (corner brackets) ================= */
+  .hud {
+    position: relative; background: var(--panel);
+    border: 1px solid var(--rule);
+    transition: border-color .35s ease, background .35s ease, transform .35s ease, box-shadow .35s ease;
+  }
+  .hud::before, .hud::after,
+  .hud > .corner::before, .hud > .corner::after {
+    content: ""; position: absolute; width: 14px; height: 14px; pointer-events: none;
+    transition: all .35s ease;
+  }
+  .hud::before { top: -1px; left: -1px; border-top: 1.5px solid #fff; border-left: 1.5px solid #fff; }
+  .hud::after { top: -1px; right: -1px; border-top: 1.5px solid #fff; border-right: 1.5px solid #fff; }
+  .hud > .corner::before { bottom: -1px; left: -1px; border-bottom: 1.5px solid #fff; border-left: 1.5px solid #fff; }
+  .hud > .corner::after { bottom: -1px; right: -1px; border-bottom: 1.5px solid #fff; border-right: 1.5px solid #fff; }
+  .hud:hover {
+    border-color: rgba(255,255,255,.4);
+    background: rgba(255,255,255,.05);
+    transform: translateY(-3px);
+    box-shadow: 0 18px 50px -18px rgba(255,255,255,.14), 0 0 0 1px rgba(255,255,255,.06);
+  }
+  .hud:hover::before, .hud:hover::after,
+  .hud:hover > .corner::before, .hud:hover > .corner::after { width: 22px; height: 22px; }
+
+  /* ================= signal path ================= */
+  .signal { border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); padding: 38px 0 22px; position: relative; }
+  .signal-scroll { overflow-x: auto; }
+  .signal svg { display: block; min-width: 860px; width: 100%; height: auto; }
+  .signal-caption { font-family: var(--mono); font-size: .7rem; color: var(--faint); letter-spacing: .12em; margin-top: 12px; }
+  .svg-line { stroke: rgba(255,255,255,.3); stroke-width: 1.2; fill: none; }
+  .svg-line-loop { stroke: rgba(255,255,255,.16); stroke-width: 1; fill: none; stroke-dasharray: 3 4; }
+  .svg-node { fill: #000; stroke: rgba(255,255,255,.55); stroke-width: 1.2; }
+  .svg-gate { fill: #000; stroke: #fff; stroke-width: 1.4; filter: drop-shadow(0 0 6px rgba(255,255,255,.5)); animation: gatepulse 3s ease-in-out infinite; }
+  @keyframes gatepulse {
+    0%, 100% { filter: drop-shadow(0 0 4px rgba(255,255,255,.35)); }
+    50% { filter: drop-shadow(0 0 12px rgba(255,255,255,.75)); }
+  }
+  .svg-label { font-family: var(--mono); font-size: 11px; letter-spacing: .12em; fill: #fff; }
+  .svg-sublabel { font-family: var(--mono); font-size: 9.5px; letter-spacing: .1em; fill: rgba(255,255,255,.62); }
+  .svg-gatelabel { font-family: var(--mono); font-size: 9.5px; letter-spacing: .14em; fill: rgba(255,255,255,.8); }
+  .pulse { fill: #fff; filter: drop-shadow(0 0 6px #fff); }
+  .pulse-trail { fill: rgba(255,255,255,.35); }
+
+  /* ================= glue strip ================= */
+  .glue { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 40px; }
+  .glue > div { padding: 22px 20px 26px; }
+  .glue .part { font-family: var(--mono); font-size: .78rem; letter-spacing: .12em; color: var(--paper); text-transform: uppercase; }
+  .glue .part::before { content: "◈ "; color: var(--faint); }
+  .glue p { font-size: .86rem; color: var(--faint); margin-top: 10px; line-height: 1.55; }
+  @media (max-width: 760px) { .glue { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 460px) { .glue { grid-template-columns: 1fr; } }
+
+  /* ================= tenets ================= */
+  .tenets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .tenet { padding: 28px 24px 32px; display: flex; flex-direction: column; gap: 13px; }
+  .tenet svg { width: 28px; height: 28px; stroke: #fff; stroke-width: 1.4; fill: none; stroke-linecap: round; stroke-linejoin: round; filter: drop-shadow(0 0 5px rgba(255,255,255,.4)); }
+  .tenet p { font-size: .92rem; color: var(--dim); line-height: 1.6; }
+  @media (max-width: 860px) { .tenets { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .tenets { grid-template-columns: 1fr; } }
+
+  /* ================= architecture cols ================= */
+  .cols { display: grid; grid-template-columns: 260px 1fr; gap: 48px; align-items: start; margin-top: 52px; padding-top: 44px; border-top: 1px solid var(--rule); }
+  .cols.first { margin-top: 0; border-top: 0; padding-top: 0; }
+  .cols .side { position: sticky; top: 70px; display: flex; flex-direction: column; gap: 10px; }
+  .cols .side .k { font-family: var(--mono); font-size: .7rem; letter-spacing: .2em; color: var(--faint); text-transform: uppercase; }
+  .cols .side .k::after { content: ""; display: block; margin-top: 10px; width: 26px; height: 1px; background: var(--ghost); }
+  .cols .main { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+  @media (max-width: 820px) { .cols { grid-template-columns: 1fr; gap: 20px; } .cols .side { position: static; } }
+
+  /* ================= tables ================= */
+  .tbl-scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: .86rem; }
+  th {
+    font-family: var(--mono); font-size: .66rem; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--faint); font-weight: 500; text-align: left;
+    padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,.25); white-space: nowrap;
+  }
+  td { padding: 13px 16px; border-bottom: 1px solid var(--rule); vertical-align: top; color: var(--dim); line-height: 1.55; }
+  tbody tr { transition: background .25s ease; }
+  tbody tr:hover { background: rgba(255,255,255,.045); }
+  tr:last-child td { border-bottom: 0; }
+  td:first-child { font-family: var(--mono); font-size: .8rem; color: var(--paper); white-space: nowrap; }
+  td .num { font-variant-numeric: tabular-nums; }
+
+  /* ================= pre ================= */
+  pre {
+    font-family: var(--mono); font-size: .8rem; line-height: 1.7;
+    color: var(--dim); padding: 24px 28px; margin: 0; overflow-x: auto;
+  }
+  pre .hi { color: #fff; text-shadow: 0 0 10px rgba(255,255,255,.35); }
+  pre .mut { color: var(--faint); }
+
+  /* ================= spec list ================= */
+  .spec { border-top: 1px solid var(--rule); margin: 0; }
+  .spec-item {
+    display: grid; grid-template-columns: 220px 1fr; gap: 32px; padding: 22px 12px;
+    border-bottom: 1px solid var(--rule);
+    transition: background .3s ease;
+  }
+  .spec-item > * { transition: transform .3s cubic-bezier(.2,.7,.2,1); }
+  .spec-item:hover { background: rgba(255,255,255,.035); }
+  .spec-item:hover > * { transform: translateX(10px); }
+  .spec-item dt { font-family: var(--mono); font-size: .76rem; letter-spacing: .08em; color: var(--paper); margin: 0; padding-top: 2px; }
+  .spec-item dt::before { content: "// "; color: var(--ghost); }
+  .spec-item dd { margin: 0; font-size: .92rem; color: var(--dim); max-width: 68ch; }
+  @media (max-width: 700px) { .spec-item { grid-template-columns: 1fr; gap: 6px; } }
+
+  footer {
+    margin-top: 120px; padding: 30px 0 60px; border-top: 1px solid var(--rule);
+    display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+    font-family: var(--mono); font-size: .7rem; letter-spacing: .16em; text-transform: uppercase; color: var(--faint);
+  }
+  footer .sig { color: var(--paper); text-shadow: 0 0 12px rgba(255,255,255,.4); }
+
+  /* ================= reduced motion ================= */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+    .scanline, .pulse, .pulse-trail { display: none; }
+    .rv { opacity: 1; transform: none; }
+    #boot { display: none; }
+    html { scroll-behavior: auto; }
+  }
+</style>
+<noscript>
+<style>
+  /* no JS: skip the boot theater, show all reveal-gated content */
+  #boot { display: none; }
+  .rv { opacity: 1; transform: none; }
+</style>
+</noscript>
+</head>
+<body>
+
+<!-- boot sequence: pure theater, hidden from assistive tech, any click/key skips it -->
+<div id="boot" title="Click to skip" aria-hidden="true">
+  <div class="boot-inner">
+    <div class="boot-title" id="bootTitle">J A R V I S</div>
+    <div class="boot-line">> mounting session store ............ <span class="ok">OK</span></div>
+    <div class="boot-line">> linear webhook listener ........... <span class="ok">OK</span></div>
+    <div class="boot-line">> e2b sandbox templates ............. <span class="ok">OK</span></div>
+    <div class="boot-line">> reconciling interrupted runs ...... <span class="ok">0 FOUND</span></div>
+    <div class="boot-line">> human gates ....................... <span class="ok">2 ARMED</span></div>
+    <div class="boot-line">> agent <span class="ok">ONLINE</span><span class="blink">▍</span></div>
+  </div>
+  <div class="boot-skip">click or press any key to skip</div>
+</div>
+
+<div class="hud-grid"></div>
+<div class="hud-glow"></div>
+<div class="scanline"></div>
+<div class="vignette"></div>
+
+<!-- status bar -->
+<div class="statusbar">
+  <div class="statusbar-in">
+    <span class="name">JARVIS</span>
+    <span class="sys" aria-hidden="true">
+      <span>sys <span class="live">ONLINE</span></span>
+      <span>gates <span class="live">2 / 2 ARMED</span></span>
+      <span id="clock" class="live">00:00:00</span>
+    </span>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <!-- ============ HERO ============ -->
+  <header class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow">A coding agent that lives in Linear</span>
+      <h1>An issue goes in.<br><span class="typed-caret">A pull request comes out.</span></h1>
+      <p class="sub">Everything in between (the plan, the code, the tests) happens in a disposable sandbox, and <em>nothing ships without a human saying yes. Twice.</em></p>
+    </div>
+    <div class="reactor" aria-hidden="true">
+      <svg viewBox="0 0 200 200">
+        <circle class="ring ring-d" cx="100" cy="100" r="92" stroke-dasharray="2 6"/>
+        <circle class="ring ring-a" cx="100" cy="100" r="74" stroke-dasharray="40 14 8 14"/>
+        <circle class="ring ring-b" cx="100" cy="100" r="56" stroke-dasharray="4 7"/>
+        <circle class="ring ring-c" cx="100" cy="100" r="36" stroke-dasharray="60 30"/>
+        <g class="ring ring-b">
+          <path d="M100 12 v10 M100 178 v10 M12 100 h10 M178 100 h10" stroke="rgba(255,255,255,.5)" stroke-width="1.2"/>
+        </g>
+        <circle class="core" cx="100" cy="100" r="8"/>
+        <circle cx="100" cy="100" r="16" fill="none" stroke="rgba(255,255,255,.65)" stroke-width="1"/>
+      </svg>
+    </div>
+  </header>
+
+  <!-- ============ SIGNAL PATH ============ -->
+  <div class="signal rv">
+    <div class="signal-scroll">
+      <svg viewBox="0 0 960 190" role="img" aria-label="Pipeline: Linear issue, plan, human approval gate, sandboxed implementation, pull request, human merge gate">
+        <path class="svg-line" d="M 30 95 H 930" />
+        <path class="svg-line-loop" d="M 388 88 C 370 40, 240 40, 222 84" />
+        <path class="svg-line-loop" d="M 222 84 l -5 -8 M 222 84 l 8 -4" />
+        <text class="svg-sublabel" x="300" y="38" text-anchor="middle">FEEDBACK ≠ APPROVE → REVISE</text>
+
+        <circle class="svg-node" cx="60" cy="95" r="7"/>
+        <text class="svg-label" x="60" y="130" text-anchor="middle">ISSUE</text>
+        <text class="svg-sublabel" x="60" y="146" text-anchor="middle">assigned to jarvis</text>
+
+        <rect class="svg-node" x="180" y="80" width="84" height="30"/>
+        <text class="svg-label" x="222" y="130" text-anchor="middle">PLAN</text>
+        <text class="svg-sublabel" x="222" y="146" text-anchor="middle">sandbox · read-only</text>
+
+        <path class="svg-gate" d="M 400 77 L 418 95 L 400 113 L 382 95 Z"/>
+        <text class="svg-gatelabel" x="400" y="60" text-anchor="middle">HUMAN GATE 1</text>
+        <text class="svg-label" x="400" y="130" text-anchor="middle">APPROVE</text>
+        <text class="svg-sublabel" x="400" y="146" text-anchor="middle">blocks until yes</text>
+
+        <rect class="svg-node" x="520" y="74" width="130" height="42"/>
+        <rect x="526" y="80" width="118" height="30" fill="none" stroke="rgba(255,255,255,.18)" stroke-width="1" stroke-dasharray="3 3"/>
+        <text class="svg-label" x="585" y="130" text-anchor="middle">IMPLEMENT</text>
+        <text class="svg-sublabel" x="585" y="146" text-anchor="middle">e2b sandbox · code + tests + push</text>
+
+        <circle class="svg-node" cx="750" cy="95" r="7"/>
+        <text class="svg-label" x="750" y="130" text-anchor="middle">PULL REQUEST</text>
+        <text class="svg-sublabel" x="750" y="146" text-anchor="middle">opened, never merged</text>
+
+        <path class="svg-gate" d="M 890 77 L 908 95 L 890 113 L 872 95 Z"/>
+        <text class="svg-gatelabel" x="890" y="60" text-anchor="middle">HUMAN GATE 2</text>
+        <text class="svg-label" x="890" y="130" text-anchor="middle">MERGE</text>
+        <text class="svg-sublabel" x="890" y="146" text-anchor="middle">humans only</text>
+
+        <circle class="pulse-trail" r="2">
+          <animateMotion dur="9s" begin="0.25s" repeatCount="indefinite"
+            keyPoints="0;0.39;0.39;0.61;0.61;0.8;0.8;1" keyTimes="0;0.3;0.42;0.62;0.68;0.82;0.9;1"
+            calcMode="linear" path="M 30 95 H 930"/>
+        </circle>
+        <circle class="pulse" r="3.2">
+          <animateMotion dur="9s" repeatCount="indefinite"
+            keyPoints="0;0.39;0.39;0.61;0.61;0.8;0.8;1" keyTimes="0;0.3;0.42;0.62;0.68;0.82;0.9;1"
+            calcMode="linear" path="M 30 95 H 930"/>
+        </circle>
+      </svg>
+    </div>
+    <div class="signal-caption">FIG. 1 — THE ONLY PATH TO PRODUCTION. THE PULSE WAITS AT EVERY DIAMOND.</div>
+  </div>
+
+  <!-- ============ WHAT IT IS ============ -->
+  <section>
+    <div class="section-head rv">
+      <h2>A teammate you assign tickets to, not a tool you operate</h2>
+    </div>
+    <div class="rv" style="display:flex;flex-direction:column;gap:20px">
+      <p>Jarvis is a coding agent for the company. Assign a Linear issue to it and it behaves the way a careful engineer would: it reads the codebase, asks questions if the request is really a question, posts a plan as a comment, and waits. When a human replies <strong>approve</strong>, it writes the code inside an isolated cloud sandbox, runs the tests, pushes a branch, and opens a GitHub pull request. Then it stops: merging is a human's job, permanently.</p>
+      <p><strong>Jarvis is glue, not an engine.</strong> It does not reimplement a planner, a debugger, or a review engine. It wires four existing systems together and owns only the connective tissue: a webhook receiver, a session store, an orchestrator state machine, the Linear&nbsp;⇄&nbsp;agent adapters, and the system prompts. Everything hard is delegated.</p>
+    </div>
+    <div class="glue">
+      <div class="hud rv"><span class="corner"></span>
+        <span class="part">Claude Agent SDK</span>
+        <p>The autonomous loop: reasoning, tool use, editing, self-correction.</p>
+      </div>
+      <div class="hud rv rv-d1"><span class="corner"></span>
+        <span class="part">Superpowers skills</span>
+        <p>The methodology: brainstorming, plan-writing, systematic debugging, code review.</p>
+      </div>
+      <div class="hud rv rv-d2"><span class="corner"></span>
+        <span class="part">E2B</span>
+        <p>The sandbox: every generated line runs in a disposable cloud VM, never on the host.</p>
+      </div>
+      <div class="hud rv rv-d3"><span class="corner"></span>
+        <span class="part">Linear</span>
+        <p>The surface: issues, comments, and approvals are the entire user interface.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ IDEOLOGY ============ -->
+  <section>
+    <div class="section-head rv">
+      <h2>Six positions the code refuses to compromise on</h2>
+    </div>
+    <div class="tenets">
+      <div class="tenet hud rv"><span class="corner"></span>
+        <svg viewBox="0 0 24 24"><path d="M8 8h8v8H8z"/><path d="M4 12h4M16 12h4M12 4v4M12 16v4"/></svg>
+        <h3>Glue, not engine</h3>
+        <p>If a mature system already does the job, Jarvis wires it in rather than rebuilding it. The repo's value is the seams, not the parts.</p>
+      </div>
+      <div class="tenet hud rv rv-d1"><span class="corner"></span>
+        <svg viewBox="0 0 24 24"><path d="M12 3l9 9-9 9-9-9z"/><path d="M12 9v4M12 16.5v.5"/></svg>
+        <h3>Two human gates</h3>
+        <p>No plan is implemented without approval; no PR is merged by Jarvis, ever. Both gates are structural: they cannot be bypassed in code.</p>
+      </div>
+      <div class="tenet hud rv rv-d2"><span class="corner"></span>
+        <svg viewBox="0 0 24 24"><path d="M12 4v10"/><circle cx="12" cy="19" r="1.5"/><path d="M5 8l7-4 7 4"/></svg>
+        <h3>Fail loud</h3>
+        <p>Every error path both logs and posts to Linear. A session that dies silently is worse than one that says exactly how it died.</p>
+      </div>
+      <div class="tenet hud rv"><span class="corner"></span>
+        <svg viewBox="0 0 24 24"><path d="M4 18c3-8 6-8 8-4s5 4 8-4"/><path d="M4 6h16" stroke-dasharray="2 3"/></svg>
+        <h3>Advisory everything</h3>
+        <p>Memory, screenshots, symbol indexing, status nudges: every enhancement fails soft. A broken bonus never blocks a run.</p>
+      </div>
+      <div class="tenet hud rv rv-d1"><span class="corner"></span>
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 3"/></svg>
+        <h3>Durable by issue</h3>
+        <p>Work is keyed to the issue, not the session. Kill the sandbox, restart the host, re-assign the ticket: Jarvis resumes from the pushed branch and the saved plan, never from scratch.</p>
+      </div>
+      <div class="tenet hud rv rv-d2"><span class="corner"></span>
+        <svg viewBox="0 0 24 24"><path d="M7 12h10M17 12l-4-4M17 12l-4 4"/><path d="M4 5v14"/></svg>
+        <h3>Deliberate laziness</h3>
+        <p>Regex before classifier, SQLite before ORM, one sandbox before a pool. Every shortcut carries a <code>ponytail:</code> comment naming its ceiling and its upgrade path.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ARCHITECTURE ============ -->
+  <section>
+    <div class="section-head rv">
+      <h2>One state machine, one sandbox, three channels</h2>
+    </div>
+
+    <div class="cols first">
+      <div class="side rv">
+        <span class="k">A · Lifecycle</span>
+        <h3>The phase state machine</h3>
+        <p style="font-size:.88rem">Every session is a row in SQLite walking this graph. A host restart loses nothing but live steering; boot reconciliation re-attaches to running sandboxes and replays their results.</p>
+      </div>
+      <div class="main rv">
+        <div class="hud"><span class="corner"></span><pre>
+<span class="hi">clarify</span> ─ chat loop: questions answered in place; a change request escalates ─▶ <span class="hi">plan</span>
+
+<span class="hi">plan</span> ──▶ <span class="hi">await_approval</span> ⇄ plan     <span class="mut">revision loop — any feedback that isn't approval</span>
+                │
+                └─ approve ──▶ <span class="hi">implement</span> ──▶ <span class="hi">done</span>
+                                    │
+                                    └─ failure ──▶ <span class="hi">error</span>  <span class="mut">fail loud, retry by re-assigning</span>
+
+<span class="hi">done</span> ⇄ <span class="hi">review</span>      <span class="mut">question on a finished PR — report only, always returns to done</span>
+<span class="hi">done</span> ⇄ <span class="hi">implement</span>   <span class="mut">change request on a finished PR — updates it in place, same branch</span></pre></div>
+        <p>Which way a reply routes is decided by small, cheap <strong>Haiku classifiers</strong> on the host. Is this new issue a question or a change request? Is this follow-up a revision or a review ask? Each one is a raw API call that fails soft to the safest answer.</p>
+        <p>A plan can also come back as a <strong>decomposition</strong>: if the issue is too big, the planner returns a numbered split instead, and on approval Jarvis creates the sub-issues in Linear and assigns them to itself. Each one then runs this whole pipeline on its own.</p>
+      </div>
+    </div>
+
+    <div class="cols">
+      <div class="side rv">
+        <span class="k">B · Isolation</span>
+        <h3>Where code executes</h3>
+        <p style="font-size:.88rem">The target repo is cloned fresh into a new E2B sandbox for every phase that needs one. Untrusted generated code never touches the host.</p>
+      </div>
+      <div class="main rv">
+        <p>Inside the sandbox the agent gets a normal developer's experience (it edits files, runs tests, starts servers, curls endpoints) and learns from real tool output instead of special plumbing. The work branch is deterministic (<code>jarvis/&lt;issueId&gt;</code>) and pushed to the remote <em>before the agent even starts</em>, then again after every meaningful step. A run that dies mid-implementation leaves recoverable work on the remote, and the next assignment resumes from it.</p>
+        <p>Host and sandbox speak over exactly three channels:</p>
+        <div class="hud"><span class="corner"></span>
+        <div class="tbl-scroll">
+          <table>
+            <thead><tr><th>Channel</th><th>Direction</th><th>Carries</th></tr></thead>
+            <tbody>
+            <tr>
+              <td>stdout · NDJSON</td>
+              <td>sandbox → host</td>
+              <td>Live telemetry (assistant text, tool calls, results) relayed to Linear activities in real time. Assumed unreliable.</td>
+            </tr>
+            <tr>
+              <td>/tmp/jarvis-result.json</td>
+              <td>sandbox → host</td>
+              <td>The <strong>authoritative</strong> final result. Streams go half-open; this file is what recovery trusts after a restart.</td>
+            </tr>
+            <tr>
+              <td>/tmp/jarvis-inbox.jsonl</td>
+              <td>host → sandbox</td>
+              <td>Mid-run steering. Comment on the issue while Jarvis works and the runner injects it into the live agent turn within ~2 seconds.</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        </div>
+        <p>The stream is raced against a detached watcher that polls the result file and checks the runner process is alive, so a hung stream can never hang the host.</p>
+      </div>
+    </div>
+
+    <div class="cols">
+      <div class="side rv">
+        <span class="k">C · Tasks</span>
+        <h3>Six jobs, one contract</h3>
+        <p style="font-size:.88rem">Each task is a goal, a model, a tool list, and hard turn + budget caps, fed to the in-sandbox runner. The difference between them is the goal text, not bespoke machinery.</p>
+      </div>
+      <div class="main rv">
+        <div class="hud"><span class="corner"></span>
+        <div class="tbl-scroll">
+          <table>
+            <thead><tr><th>Task</th><th>Model</th><th>Turns</th><th>Job</th></tr></thead>
+            <tbody>
+            <tr><td>map</td><td>Sonnet</td><td class="num">20</td><td>One-time read-only survey of the repo, cached and injected into every later task.</td></tr>
+            <tr><td>plan</td><td>Sonnet</td><td class="num">25</td><td>Produce the plan a human will approve, returned verbatim to Linear.</td></tr>
+            <tr><td>revise</td><td>Sonnet</td><td class="num">25</td><td>Plan + human feedback → revised plan. Loops until approval.</td></tr>
+            <tr><td>implement</td><td>Sonnet / Opus</td><td class="num">120</td><td>Approved plan → code, tests, pushes, <code>gh pr create</code>. Final message must be exactly the PR URL.</td></tr>
+            <tr><td>review</td><td>Sonnet</td><td class="num">40</td><td>Self-review of large diffs, and on-demand PR review for follow-up questions.</td></tr>
+            <tr><td>chat</td><td>Sonnet</td><td class="num">15</td><td>Answer a question about the issue or repo. Read-only tools, $1 cap.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        </div>
+        <p>Implementation routes its own model from the plan's fixed two-line <code>Type:</code> / <code>Scope:</code> header. A small non-refactor change runs on Sonnet at a $3 cap; anything large, and every refactor, runs on Opus at $8. A garbled header defaults to Opus: never a regression, just no saving.</p>
+      </div>
+    </div>
+
+    <div class="cols">
+      <div class="side rv">
+        <span class="k">D · Memory</span>
+        <h3>What it remembers</h3>
+        <p style="font-size:.88rem">Same-issue memory, assembled fresh for every run right after clone. Advisory end to end.</p>
+      </div>
+      <div class="main rv">
+        <p>Two layers. The <strong>visible conversation</strong> (every Linear comment across every session on the issue, newest-first, capped at 20k characters) is appended to the task goal, so the agent always knows what was already said. The <strong>raw event streams</strong> of the last ten runs are exported into the sandbox as files the agent can grep on demand: what it tried before, what failed, what the tests said. If any of this breaks, the run simply proceeds memory-less.</p>
+        <p>Persistence is seven SQLite tables and no ORM: sessions, cached repo maps, runs, raw run events, phase-transition timings, cached Linear team states, and the auto-renewed OAuth token. The whole database also feeds <code>npm run report</code>, a failure-pattern and economics dashboard mined from what the agent actually did.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MINUTE DETAILS ============ -->
+  <section>
+    <div class="section-head rv">
+      <h2>The decisions you only see up close</h2>
+    </div>
+    <dl class="spec">
+      <div class="spec-item rv">
+        <dt>10-second rule</dt>
+        <dd>Linear marks an agent unresponsive after 10 seconds. Every webhook is acknowledged with a thought activity before any real work starts, and every error path posts an activity. A session never just goes quiet.</dd>
+      </div>
+      <div class="spec-item rv">
+        <dt>prompt-cache discipline</dt>
+        <dd>System prompt suffixes are byte-stable; per-run content (issue body, repo map, plan) goes in the goal instead, so the Agent SDK's prompt cache hits across every run. Bounded tasks also run at reduced reasoning effort to cut thinking-token spend.</dd>
+      </div>
+      <div class="spec-item rv">
+        <dt>approval is a regex</dt>
+        <dd>Deliberately. "Approve" and "stop" are keyword parsers, not classifiers; the known ceiling (sarcasm, odd phrasing) and the upgrade path are written next to the code. The subtler judgments (question vs. change, revise vs. review) do get a classifier, the cheapest one available.</dd>
+      </div>
+      <div class="spec-item rv">
+        <dt>the empty branch push</dt>
+        <dd>The work branch is pushed to the remote before the implementing agent runs a single turn. A run that dies in its first minute still leaves an assignable branch behind.</dd>
+      </div>
+      <div class="spec-item rv">
+        <dt>baked runner</dt>
+        <dd>The in-sandbox runner script is baked into the E2B template at build time, never uploaded per-run. The tradeoff is honest: change the runner, rebuild the template, or sandboxes silently run the old one.</dd>
+      </div>
+      <div class="spec-item rv">
+        <dt>steering by tail</dt>
+        <dd>Mid-run comments are base64-encoded, echoed onto an inbox file inside the sandbox, and picked up by a 2-second tail loop. No sockets, no message broker, nothing to reconnect after a restart.</dd>
+      </div>
+      <div class="spec-item rv">
+        <dt>cumulative accounting</dt>
+        <dd>The SDK reports usage for the final turn only; the runner sums every turn into a cumulative total, so the cost ledger reflects what a run actually spent.</dd>
+      </div>
+      <div class="spec-item rv">
+        <dt>screenshots ride along</dt>
+        <dd>Images pasted into Linear are downloaded host-side (capped at five images, 5&nbsp;MB each) and handed to the agent as real image content. A failed download is skipped, never fatal.</dd>
+      </div>
+      <div class="spec-item rv">
+        <dt>status follows phase</dt>
+        <dd>The Linear issue's workflow state advances as Jarvis moves (planning, implementing, PR opened, done), matched by Linear's stable state categories rather than team-specific names. There is deliberately no "error" status: Jarvis won't fake a state it isn't confident about.</dd>
+      </div>
+      <div class="spec-item rv">
+        <dt>tokens renew themselves</dt>
+        <dd>The Linear app token is minted via OAuth client-credentials, stored in SQLite, renewed a day before its ~30-day expiry on a bounded backoff, and force-refreshed on any 401. No credentials rotate through .env.</dd>
+      </div>
+      <div class="spec-item rv">
+        <dt>re-assignment is resume</dt>
+        <dd>Re-assigning an issue mints a new session, so the orchestrator first looks for the newest prior session on the same issue: finished with a PR → point at it; interrupted mid-implement → resume the branch, no re-approval; planned but unapproved → re-post the plan. A prior still running refuses the duplicate outright.</dd>
+      </div>
+      <div class="spec-item rv">
+        <dt>plan recovery from Linear itself</dt>
+        <dd>If the local database ever loses a plan, a GraphQL fallback recovers the last one straight from Linear's activity history, identified by the approval footer every plan carries.</dd>
+      </div>
+    </dl>
+  </section>
+
+  <footer>
+    <span class="sig">JARVIS — glue, not engine</span>
+    <span>Two gates. No exceptions.</span>
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // ---- boot sequence ----
+  var boot = document.getElementById("boot");
+  function dismissBoot() {
+    if (boot) { boot.classList.add("gone"); document.body.style.overflow = ""; }
+  }
+  if (boot && !reduced) {
+    document.body.style.overflow = "hidden";
+    var title = document.getElementById("bootTitle");
+    var lines = boot.querySelectorAll(".boot-line");
+    setTimeout(function () { title.classList.add("on"); }, 200);
+    lines.forEach(function (ln, i) {
+      setTimeout(function () { ln.classList.add("on"); }, 800 + i * 320);
+    });
+    setTimeout(dismissBoot, 800 + lines.length * 320 + 900);
+    boot.addEventListener("click", dismissBoot);
+    document.addEventListener("keydown", dismissBoot, { once: true });
+  } else {
+    dismissBoot();
+  }
+
+  // ---- scroll reveal ----
+  var els = document.querySelectorAll(".rv");
+  if (reduced || !("IntersectionObserver" in window)) {
+    els.forEach(function (el) { el.classList.add("in"); });
+  } else {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.12, rootMargin: "0px 0px -6% 0px" });
+    els.forEach(function (el) { io.observe(el); });
+  }
+
+  // ---- status clock ----
+  var clock = document.getElementById("clock");
+  function tick() {
+    var d = new Date();
+    clock.textContent = String(d.getHours()).padStart(2, "0") + ":" +
+      String(d.getMinutes()).padStart(2, "0") + ":" +
+      String(d.getSeconds()).padStart(2, "0");
+  }
+  tick();
+  setInterval(tick, 1000);
+})();
+</script>
+</body>
+</html>
