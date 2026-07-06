@@ -43,21 +43,6 @@ export function promptedBody(payload: unknown): string {
   return String(raw);
 }
 
-// ponytail: keyword heuristic. Ceiling: still guessable, e.g. sarcasm.
-// Upgrade path: a tiny classifier call if false signals cause real trouble.
-// A strong approval verb wins even alongside other negation words ("approve,
-// but don't use X"), UNLESS the approval itself is negated ("do not approve").
-const APPROVE = /\b(approv(?:e|ed)|lgtm|ship\s*it)\b/i;
-const APPROVE_NEGATED = /\b(?:don'?t|do\s*not|not|never|no)\s+approv/i;
-const SOFT_AFFIRM = /\b(yes|go\s*ahead|looks\s*good|sounds\s*good|proceed)\b/i;
-const SOFT_NEGATE = /\b(no|not yet|hold on|wait|reject|change|stop)\b/i;
-
-export function parseApproval(text: string): boolean {
-  if (APPROVE.test(text) && !APPROVE_NEGATED.test(text)) return true;
-  if (SOFT_NEGATE.test(text)) return false;
-  return SOFT_AFFIRM.test(text);
-}
-
 // "stop"/"cancel" while awaiting approval closes the session for good
 // (rejections like "hold on" merely keep it waiting).
 const STOP = /\b(stop|cancel|abort|never\s?mind)\b/i;

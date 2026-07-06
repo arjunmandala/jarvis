@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Sandbox } from "e2b";
-import { nextPhase, toolParameter, Orchestrator, recoverPlan, diffExceedsThreshold, runFinishFrom } from "../../src/orchestrator/pipeline.ts";
+import { nextPhase, toolParameter, Orchestrator, diffExceedsThreshold, runFinishFrom } from "../../src/orchestrator/pipeline.ts";
 import { SessionStore } from "../../src/store/sessions.ts";
 import type { Activities } from "../../src/linear/activities.ts";
 import type { IssueContext } from "../../src/linear/context.ts";
@@ -298,45 +298,6 @@ describe("steer", () => {
   // The live path (inject + thought, stop-kill, ask_user elicitation, reply
   // posting) runs inside withSandbox/runAgent — covered by live acceptance,
   // matching the repo's convention for e2b paths.
-});
-
-describe("recoverPlan", () => {
-  it("persists the recovered plan via store.setPlan and returns it", async () => {
-    const store = new SessionStore(":memory:");
-    store.upsert("as_r3", "await_approval", "iss");
-    const fetchPlan = async () => "recovered plan text";
-    const result = await recoverPlan(store, "as_r3", fetchPlan);
-    expect(result).toBe("recovered plan text");
-    expect(store.get("as_r3")?.plan).toBe("recovered plan text");
-    store.close();
-  });
-
-  it("returns null and does not persist when fetchPlan is undefined", async () => {
-    const store = new SessionStore(":memory:");
-    store.upsert("as_r4", "await_approval", "iss");
-    const result = await recoverPlan(store, "as_r4", undefined);
-    expect(result).toBeNull();
-    expect(store.get("as_r4")?.plan).toBeFalsy();
-    store.close();
-  });
-
-  it("returns null and does not persist when fetchPlan resolves to null", async () => {
-    const store = new SessionStore(":memory:");
-    store.upsert("as_r5", "await_approval", "iss");
-    const result = await recoverPlan(store, "as_r5", async () => null);
-    expect(result).toBeNull();
-    expect(store.get("as_r5")?.plan).toBeFalsy();
-    store.close();
-  });
-
-  it("returns null and does not persist when fetchPlan resolves to an empty/whitespace string", async () => {
-    const store = new SessionStore(":memory:");
-    store.upsert("as_r6", "await_approval", "iss");
-    const result = await recoverPlan(store, "as_r6", async () => "   ");
-    expect(result).toBeNull();
-    expect(store.get("as_r6")?.plan).toBeFalsy();
-    store.close();
-  });
 });
 
 // Fakes the withSandbox seam by stubbing Sandbox.create (the same static both

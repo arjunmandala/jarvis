@@ -1,8 +1,8 @@
 # jarvis
 
 A coding agent for the company: a Linear issue gets assigned to Jarvis; Jarvis
-clarifies, posts a plan, and on approval writes code, tests it in a sandbox,
-and opens a PR for a human to approve.
+talks it through, posts a plan, and once you agree writes code, tests it in a
+sandbox, and opens a PR for a human to approve.
 
 See [`BUILD_PLAN.md`](./BUILD_PLAN.md) for the full design and task breakdown, and
 [`CLAUDE.md`](./CLAUDE.md) for a deeper architecture map (protocol details, phase
@@ -11,13 +11,15 @@ state machine, module responsibilities).
 ```
 Linear issue assigned  ──►  webhook  ──►  Orchestrator  ──►  E2B sandbox
                                               │                  │
-                                        clarify → plan           │  clone repo,
+                              converse ⇄ (answer / websearch / plan)
+                                              │                  │  clone repo,
+                              ⇩ agent sees the human agree → implement
                                               │                  │  run Claude Agent SDK,
-                                        ⇩ human approves plan     │  run tests/lint,
+                                          implement  ────────────┤  run tests/lint,
                                               │                  │  git push + gh pr create
-                                          implement  ─────────────┘
+                                          GitHub PR  ────────────┘
                                               │
-                                          GitHub PR  ──►  human reviews & merges
+                                          human reviews & merges
 ```
 
 ## Project layout
@@ -33,10 +35,12 @@ src/
 │   ├── data.ts           # gathers report data from jarvis.db (failure patterns, economics)
 │   └── html.ts           # renders the jarvis-report.html dashboard
 ├── orchestrator/
-│   └── pipeline.ts       # the phase state machine (clarify→plan→implement→done)
+│   └── pipeline.ts       # the phase state machine (converse (clarify)→implement→done)
 ├── agent/
-│   ├── tasks.ts          # task builders (map / plan / revise / implement / review / chat)
-│   ├── classify.ts       # host-side Haiku classifiers (chat-vs-plan, revise-vs-review, workflow state)
+│   ├── tasks.ts          # task builders (map / plan / revise / implement / review / converse)
+│   ├── converse.ts       # ACTION protocol parser + Tier 1 (sandboxed) converse task builder
+│   ├── host-turn.ts      # Tier 0 (no-sandbox) host-side converse turn
+│   ├── classify.ts       # host-side Haiku classifiers (revise-vs-review, workflow state)
 │   ├── events.ts         # newline-delimited JSON event parsing
 │   └── runner.mjs        # runs INSIDE the E2B sandbox (Claude Agent SDK loop)
 ├── sandbox/
@@ -46,7 +50,7 @@ src/
 ├── linear/
 │   ├── client.ts         # LinearClient + plan/thread-recovery GraphQL queries
 │   ├── activities.ts     # thought/action/response/error/elicitation posts
-│   ├── context.ts        # webhook payload parsing, approve/stop parsing
+│   ├── context.ts        # webhook payload parsing, stop parsing
 │   ├── token-manager.ts  # auto-renewing Linear app-actor OAuth token
 │   ├── workflow.ts       # moves the Linear issue's status as phases advance
 │   └── attachments.ts    # downloads Linear image uploads for agent tasks

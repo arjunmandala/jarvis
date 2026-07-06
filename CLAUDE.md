@@ -76,25 +76,38 @@ Linear issue assigned to Jarvis
 │                                                                      │
 │  onCreated(ctx)                                                     │
 │    ├─ findResumableByIssue? → resume prior plan/branch/PR (below)   │
-│    ├─ classifyIntent (Haiku): question → chatTask, stays "clarify"  │
-│    ├─ store.upsert(session, "plan")                                 │
-│    ├─ withSandbox: e2b sandbox up → cloneRepo(TARGET_REPO)          │
-│    ├─ first time in repo? run mapTask() → cache in repo_maps table  │
-│    ├─ run planTask(ctx, map)            ─┐                          │
-│    └─ #finishPlan: store plan, post as   │  "tracked run":          │
-│       an `elicitation` activity + footer │  createRun row, register │
-│       → phase = await_approval           │  in #live map (steering),│
-│                                           │  stream JarvisEvents,    │
-│  onPrompted(ctx, reply)  [phase must be  │  finishRun row on exit   │
-│  await_approval, else terminal reply]    │                          │
-│    ├─ parseStop(reply)   → phase="done"  │                          │
-│    ├─ !parseApproval(reply) → reviseTask │ (revision loops back     │
-│    │    → #finishPlan again              │  into await_approval)    │
-│    └─ parseApproval(reply)               │                          │
-│         → phase="implement"              │                          │
-│         → withSandbox: clone + implementTask(ctx, plan, map)        │
-│         → #finishImplement: post PR link → phase="done", or         │
-│           #failLoud → phase="error"                                 │
+│    ├─ store.upsert(session, "clarify")                              │
+│    └─ #runConverseTurn(ctx, issue text)   ─┐                        │
+│                                             │  "tracked run" (Tier 1│
+│  #runConverseTurn(ctx, userMessage)        │  only): createRun row, │
+│  [two tiers, converge on #dispatchConverse]│  register in #live map │
+│    ├─ Tier 0: runHostTurn (host, no        │  (steering), stream    │
+│    │   sandbox) — reason/web only          │  JarvisEvents, finish  │
+│    ├─ action="need_repo" (or forced)?      │  Run row on exit       │
+│    │   → Tier 1: withSandbox, cloneRepo,   │                        │
+│    │     converseTask (agent has the repo) │                        │
+│    └─ #dispatchConverse(action, body)      │                        │
+│         ├─ action="plan" → store plan,     │                        │
+│         │    post as a `response` activity │                        │
+│         ├─ action="implement" → guarded:   │                        │
+│         │    no stored plan? refuse, stay  │                        │
+│         │    in clarify; else phase=       │                        │
+│         │    "implement", #runImplement    │                        │
+│         └─ action="reply" → post, stay in  │                        │
+│              clarify (conversation goes on)│                        │
+│                                             │                        │
+│  onPrompted(ctx, reply)  [phase="clarify"  │                        │
+│  routes back through #runConverseTurn]     │                        │
+│    ├─ parseStop(reply) → phase="done"      │                        │
+│    └─ else → #runConverseTurn(ctx, reply)  │                        │
+│         (the agent itself judges whether   │                        │
+│         the human agreed to the posted     │                        │
+│         plan and emits ACTION: implement)  │                        │
+│                                             │                        │
+│  #runImplement → phase="implement"         │                        │
+│    → withSandbox: clone + implementTask(ctx, plan, map)             │
+│    → #finishImplement: post PR link → phase="done", or              │
+│      #failLoud → phase="error"                                      │
 │                                                                      │
 │  steer(ctx, reply)  [a comment arrives WHILE a run is live]         │
 │    ├─ not live any more → apologize, no-op                          │
@@ -102,9 +115,9 @@ Linear issue assigned to Jarvis
 │    └─ else → injectMessage() appends to the sandbox's inbox file    │
 │                                                                      │
 │  reconcile()  [called once, at server boot]                        │
-│    for every session row stuck in phase plan/implement:             │
+│    for every session row stuck in phase clarify/implement/review:   │
 │      reconnect to its sandboxId → watchDetached() polls             │
-│      /tmp/jarvis-result.json → replay #finishPlan/#finishImplement, │
+│      /tmp/jarvis-result.json → replay #finishChat/#finishImplement, │
 │      or fail loud if nothing recoverable (interrupted before the    │
 │      sandboxId was even recorded, or the sandbox is gone)           │
 └───────────────────────────┬──────────────────────────────────────┘
@@ -115,26 +128,31 @@ Linear issue assigned to Jarvis
 ### Phase state machine (`src/store/sessions.ts` `Phase`)
 
 ```
-clarify → plan → await_approval ⇄ plan (revision loop, feedback ≠ approve)
-                        │
-                        └─ approve → implement → done
+converse (clarify) ──[agent emits ACTION: implement on an agreed plan]──> implement → done
+   (answers, websearch, plan drafts, revisions all stay in converse; two tiers:
+    host-side no-sandbox turn for reason/web, sandbox turn when the code is needed)
                                           │
                                           └─ failure → error
 
-done ⇄ review (reply on a finished session with a PR — report-only, always returns to done)
+done ⇄ review (unchanged PR follow-up)
     └─ done ⇄ implement (reply classified as a change request — updates the open PR in place on the existing work branch; questions/review requests take the report-only `review` path)
 ```
-`clarify` is a real resting state, not just the implicit start: `onCreated` runs
-`classifyIntent` (a host-side Haiku call, `src/agent/classify.ts`) over the issue
-text — a question routes to `chatTask` and the session stays in `clarify` (each
-reply is re-classified and can escalate to `plan`); a change request goes straight
-to `plan`. The done-session follow-up split (`revise` vs report-only `review`) is
-likewise a Haiku call (`classifyPrRevision`), defaulting to the safe `review` path.
+`clarify` is the conversational resting state, not just the implicit start:
+every pre-implementation turn — answering a question, drafting a plan, revising
+one, deciding a posted plan is agreed — runs through `#runConverseTurn`, which
+races a host-side Tier 0 turn (no sandbox, for reasoning/web) against a Tier 1
+sandbox turn (`converseTask`, when the agent needs the repo) and converges on
+`#dispatchConverse`. The agent itself judges when a plan it already posted has
+been agreed and emits `ACTION: implement`; anything else (`ACTION: plan`,
+`ACTION: reply`) keeps the session in `clarify`. The done-session follow-up
+split (`revise` vs report-only `review`) is a Haiku call (`classifyPrRevision`),
+defaulting to the safe `review` path.
 
 A plan may also come back as a `Decomposition:` list (the plan agent's escape hatch
-for an oversized issue, parsed by `parseDecomposition`). It's posted for approval
-like any plan; on approval Jarvis creates the sub-issues in Linear and self-assigns
-them — each then arrives as its own `created` webhook — instead of implementing.
+for an oversized issue, parsed by `parseDecomposition`). It's posted like any plan;
+once the human agrees and the agent emits `ACTION: implement`, Jarvis creates the
+sub-issues in Linear and self-assigns them — each then arrives as its own `created`
+webhook — instead of implementing.
 State lives in SQLite (`sessions` table), keyed by Linear's `agentSessionId`. A
 restart loses nothing except live-steering ability for runs that were mid-flight
 (`#live` is in-memory) — `reconcile()` picks those back up from `sandboxId` +
@@ -212,22 +230,22 @@ only; upgrade path for cross-issue memory is a host-side retrieval tool.
 
 ### Agent tasks (`src/agent/tasks.ts`)
 
-Six task builders, each an `AgentTask` (goal / model / allowed tools / turn+budget
-caps) fed to `runner.mjs`. `mapTask()` and `chatTask()` are deliberately read-only
-(Read/Glob/Grep, plus serena for chat); every other task shares the same
-`ALL_REPO_TOOLS` list (Read/Glob/Grep/Bash/Edit/Write/Monitor/WebSearch/WebFetch/
-`mcp__serena`/Skill/Agent/ask_user) so the agent never hits a tool wall mid-task — the
-difference between plan/revise/review/implement is the goal text, model, and turn
-cap, not the tool list:
+The task builders in `src/agent/tasks.ts` plus `converseTask()` in `src/agent/converse.ts`,
+each an `AgentTask` (goal / model / allowed tools / turn+budget caps) fed to `runner.mjs`.
+`mapTask()` is deliberately read-only (Read/Glob/Grep); every other task, including
+`converseTask()`, shares the same `ALL_REPO_TOOLS` list (Read/Glob/Grep/Bash/Edit/Write/
+Monitor/WebSearch/WebFetch/`mcp__serena`/Skill/Agent/ask_user) so the agent never hits a
+tool wall mid-task — the difference between converse/plan/revise/review/implement is the
+goal text, model, and turn cap, not the tool list:
 
 | Task | Model | Max turns | Purpose |
 |---|---|---|---|
 | `mapTask()` | sonnet-5 | 20 | one-time per repo, cached in `repo_maps` table, injected into all later tasks for that repo |
+| `converseTask()` | sonnet-5 | 30 | Tier 1 (sandboxed) half of the conversational turn — answers, websearch, plan drafts/revisions, and the `ACTION: implement` decision, with full repo access; `runHostTurn` is the sandbox-free Tier 0 half of the same turn |
 | `planTask()` | sonnet-5 | 25 | read-only in practice; final message = the plan (returned verbatim to the human) |
 | `reviseTask()` | sonnet-5 | 25 | plan + human feedback → revised plan |
-| `implementTask()` | sonnet-5 **or** opus-4-8 (routed) | 120 | approved plan → code, tests, push, `gh pr create`; final message must be exactly the PR URL, or `PR_FAILED: <reason>`. Takes an optional `workBranch`: when set (a resumed run), it pins that branch (`git checkout -B <workBranch> origin/<workBranch> \|\| git checkout -b <workBranch>`) instead of branching fresh, and pushes after each meaningful step rather than once at the end, so a mid-run death leaves recoverable work on the remote |
+| `implementTask()` | sonnet-5 **or** opus-4-8 (routed) | 120 | agreed plan → code, tests, push, `gh pr create`; final message must be exactly the PR URL, or `PR_FAILED: <reason>`. Takes an optional `workBranch`: when set (a resumed run), it pins that branch (`git checkout -B <workBranch> origin/<workBranch> \|\| git checkout -b <workBranch>`) instead of branching fresh, and pushes after each meaningful step rather than once at the end, so a mid-run death leaves recoverable work on the remote |
 | `reviewTask()` | sonnet-5 | 40 | self-review of big diffs + on-demand PR review; final message = the report |
-| `chatTask()` | sonnet-5 | 15 | answers a question about the issue/repo (clarify phase) — read-only tools, $1 cap, session stays conversational |
 
 Every task can carry `images`: screenshots pasted into Linear arrive as markdown
 links to `uploads.linear.app`, downloaded host-side by `fetchImageAttachments`
@@ -259,10 +277,12 @@ fixed contract `Type: <…>` / `Scope: <small|large>`; `implementTask` parses th
   Linear's Agent Interaction API expects (`thought`, `action`, `response`, `error`,
   `elicitation`). `response`/`error`/`elicitation` retry (they gate phase transitions —
   a dropped post wedges the session); `thought`/`action` are one-shot telemetry.
-- `context.ts` — payload → `IssueContext` extraction, and the approve/stop keyword
-  parsers (`parseApproval`, `parseStop`) gating the state machine. These are
-  intentionally a regex heuristic, not a classifier — see the `ponytail:` comment
-  in the file for the known ceiling (sarcasm/edge phrasing) and upgrade path.
+- `context.ts` — payload → `IssueContext` extraction, and the `parseStop` keyword
+  parser gating a deterministic session kill. Plan agreement is no longer a
+  regex: the conversational agent decides when a posted plan has been agreed and
+  emits `ACTION: implement` itself (see the phase state machine above); `stop`
+  stays a keyword check on purpose — see the `ponytail:` comment in the file for
+  the known ceiling (sarcasm/edge phrasing) and upgrade path.
 - `token-manager.ts` — `LinearTokenManager`, the automatic app-actor token renewal
   described under Runtime prerequisites above.
 - `attachments.ts` — extracts + downloads Linear image uploads for task `images`
@@ -274,7 +294,7 @@ fixed contract `Type: <…>` / `Scope: <small|large>`; `implementTask` parses th
   in SQLite (`team_states`). Advisory end-to-end — a failure never blocks a run,
   and there's deliberately no "error" transition.
 
-The narrow host-side classification decisions above (chat-vs-plan, revise-vs-review,
+The narrow host-side classification decisions above (revise-vs-review,
 workflow-state tiebreak) live in `src/agent/classify.ts`: raw `fetch` calls to the
 Messages API on Haiku, no SDK, no sandbox — every one fails soft to a safe default.
 

@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import {
   extractContext,
   promptedBody,
-  parseApproval,
   parseStop,
   isValidBranchName,
 } from "../../src/linear/context.ts";
@@ -67,27 +66,6 @@ describe("promptedBody", () => {
   it("reads agentActivity.body", () => {
     expect(promptedBody({ action: "prompted", agentActivity: { body: "approve" } })).toBe("approve");
   });
-});
-
-describe("parseApproval", () => {
-  it.each([
-    "approve",
-    "Approved!",
-    "LGTM",
-    "yes go ahead",
-    "ship it",
-    "looks good",
-    "approve, and dont use the llm because there is no env for you", // approve wins over trailing "dont"/"no"
-    "approved — but keep the diff small",
-  ])("treats %s as approval", (t) => expect(parseApproval(t)).toBe(true));
-  it.each([
-    "no",
-    "please change the endpoint name",
-    "not yet",
-    "hold on",
-    "do not approve this",
-    "don't approve yet",
-  ])("treats %s as not-approval", (t) => expect(parseApproval(t)).toBe(false));
 });
 
 describe("parseStop", () => {

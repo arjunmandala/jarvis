@@ -5,7 +5,7 @@ import type { IssueContext } from "../linear/context.ts";
 import { APPROVAL_FOOTER, isValidBranchName } from "../linear/context.ts";
 import { withSandbox, cloneRepo, runAgent, watchDetached, injectMessage, runCommand, redactSecret, REPO_DIR, type AgentSandbox } from "../sandbox/session.ts";
 import { Sandbox } from "e2b";
-import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask } from "../agent/tasks.ts";
+import { planTask, implementTask, mapTask, reviseTask, reviewTask } from "../agent/tasks.ts";
 import type { AgentTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
 import { prepareHistory, type ThreadFetcher } from "../history/history.ts";
@@ -72,23 +72,6 @@ export function toolParameter(input: unknown): string {
   return json && json !== "{}" && json !== "null" ? json.slice(0, 200) : "";
 }
 
-// Extracted so it can be unit-tested without entering withSandbox/e2b: fetches
-// a missing plan via `fetchPlan`, persists it, and returns it — or null if
-// there's nothing to recover. Used by onPrompted before the missing-plan
-// error path.
-export async function recoverPlan(
-  store: Pick<SessionStore, "setPlan">,
-  agentSessionId: string,
-  fetchPlan: ((id: string) => Promise<string | null>) | undefined,
-): Promise<string | null> {
-  if (!fetchPlan) return null;
-  const recovered = await fetchPlan(agentSessionId);
-  if (!recovered || !recovered.trim()) return null;
-  console.log(`[recover] ${agentSessionId} recovered plan from Linear (${recovered.length} chars)`);
-  store.setPlan(agentSessionId, recovered);
-  return recovered;
-}
-
 // Result → runs-row mapping, shared by the live path (#logUsage) and reconcile
 // (which lost the in-memory runId across the restart and closes the row via
 // finishOpenRun instead).
@@ -119,7 +102,6 @@ export class Orchestrator {
   #config: Config;
   #store: SessionStore;
   #makeActs: (agentSessionId: string) => Activities;
-  #fetchPlan?: (agentSessionId: string) => Promise<string | null>;
   #fetchThread?: ThreadFetcher;
   #connect: (sandboxId: string) => Promise<Reconnected>;
   // A factory, not a static client: the OAuth token rotates (auto-renewal), so
@@ -156,7 +138,6 @@ export class Orchestrator {
     this.#config = config;
     this.#store = store;
     this.#makeActs = makeActs;
-    this.#fetchPlan = fetchPlan;
     this.#fetchThread = fetchThread;
     this.#linearFor = linearFor;
     // Fall back to the bootstrap .env token when no live token source is wired
@@ -499,45 +480,13 @@ export class Orchestrator {
     await acts.response(`${body}${costSuffix}`);
   }
 
-  // ponytail: dead code as of the converse-turn rewrite (Task 6) — nothing calls
-  // #runChat any more (chat now runs through #runConverseTurn/converseTask), but
-  // #finishChat below is still live: reconcile() replays a recovered Tier 1
-  // converse-sandbox result through it for any "clarify"-phase row. Left in place
-  // rather than deleted, since that's a broader cleanup than this task's scope.
-  // Stays in phase "clarify" on both success and failure — a chat thread is meant
-  // to stay conversational; unlike plan/implement, a failed answer is retried by
-  // simply replying again, never wedged into "error".
-  async #runChat(ctx: IssueContext, acts: Activities, branch: string | null): Promise<void> {
-    console.log(`[phase] ${ctx.agentSessionId} clarify: answering`);
-    await acts.thought("Reading the codebase to answer…");
-
-    let cloneFailed = false;
-    const result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
-      this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
-      try {
-        await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), branch);
-      } catch (err) {
-        cloneFailed = true;
-        console.error(`[phase] ${ctx.agentSessionId} chat clone failed: ${err instanceof Error ? err.message : String(err)}`);
-        return null;
-      }
-      const map = this.#store.getRepoMap(this.#config.targetRepo);
-      const history = await this.#timed(ctx.agentSessionId, "history", () =>
-        prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
-      );
-      const images = await this.#extractImages(ctx, history);
-      return this.#trackedRun(ctx.agentSessionId, "chat", sbx, chatTask(ctx, map, history, images), acts);
-    });
-
-    this.#store.setSandbox(ctx.agentSessionId, null);
-    if (cloneFailed) {
-      console.error(`[phase] ${ctx.agentSessionId} chat clone failed — staying in clarify`);
-      await acts.error("I couldn't clone the repository to answer that. Reply again to retry.").catch(() => undefined);
-      return;
-    }
-    await this.#finishChat(ctx.agentSessionId, acts, result);
-  }
-
+  // #runChat (the old clarify-phase runner) was deleted as dead code in Task 7 —
+  // chat now runs through #runConverseTurn/converseTask. #finishChat below is
+  // still live: reconcile() replays a recovered Tier 1 converse-sandbox result
+  // through it for any "clarify"-phase row. Stays in phase "clarify" on both
+  // success and failure — a chat thread is meant to stay conversational; unlike
+  // plan/implement, a failed answer is retried by simply replying again, never
+  // wedged into "error".
   async #finishChat(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
     const text = result?.kind === "result" && result.text ? result.text.trim() : "";
     if (!text) {
@@ -1091,7 +1040,4 @@ export class Orchestrator {
 }
 
 // re-export from context to avoid a circular import in tests
-import {
-  parseApproval as parseApprovalGate,
-  parseStop as parseStopGate,
-} from "../linear/context.ts";
+import { parseStop as parseStopGate } from "../linear/context.ts";

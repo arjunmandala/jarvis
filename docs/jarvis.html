@@ -367,7 +367,7 @@
         <path class="svg-line" d="M 30 95 H 930" />
         <path class="svg-line-loop" d="M 388 88 C 370 40, 240 40, 222 84" />
         <path class="svg-line-loop" d="M 222 84 l -5 -8 M 222 84 l 8 -4" />
-        <text class="svg-sublabel" x="300" y="38" text-anchor="middle">FEEDBACK ≠ APPROVE → REVISE</text>
+        <text class="svg-sublabel" x="300" y="38" text-anchor="middle">STILL TALKING → KEEP REVISING</text>
 
         <circle class="svg-node" cx="60" cy="95" r="7"/>
         <text class="svg-label" x="60" y="130" text-anchor="middle">ISSUE</text>
@@ -379,8 +379,8 @@
 
         <path class="svg-gate" d="M 400 77 L 418 95 L 400 113 L 382 95 Z"/>
         <text class="svg-gatelabel" x="400" y="60" text-anchor="middle">HUMAN GATE 1</text>
-        <text class="svg-label" x="400" y="130" text-anchor="middle">APPROVE</text>
-        <text class="svg-sublabel" x="400" y="146" text-anchor="middle">blocks until yes</text>
+        <text class="svg-label" x="400" y="130" text-anchor="middle">PLAN OK</text>
+        <text class="svg-sublabel" x="400" y="146" text-anchor="middle">agent sees you agree</text>
 
         <rect class="svg-node" x="520" y="74" width="130" height="42"/>
         <rect x="526" y="80" width="118" height="30" fill="none" stroke="rgba(255,255,255,.18)" stroke-width="1" stroke-dasharray="3 3"/>
@@ -417,7 +417,7 @@
       <h2>A teammate you assign tickets to, not a tool you operate</h2>
     </div>
     <div class="rv" style="display:flex;flex-direction:column;gap:20px">
-      <p>Jarvis is a coding agent for the company. Assign a Linear issue to it and it behaves the way a careful engineer would: it reads the codebase, asks questions if the request is really a question, posts a plan as a comment, and waits. When a human replies <strong>approve</strong>, it writes the code inside an isolated cloud sandbox, runs the tests, pushes a branch, and opens a GitHub pull request. Then it stops: merging is a human's job, permanently.</p>
+      <p>Jarvis is a coding agent for the company. Assign a Linear issue to it and it behaves the way a careful engineer would: it reads the codebase, asks questions if the request is really a question, posts a plan as a comment, and keeps talking it through. When you're agreed on the plan, it writes the code inside an isolated cloud sandbox, runs the tests, pushes a branch, and opens a GitHub pull request. Then it stops: merging is a human's job, permanently.</p>
       <p><strong>Jarvis is glue, not an engine.</strong> It does not reimplement a planner, a debugger, or a review engine. It wires four existing systems together and owns only the connective tissue: a webhook receiver, a session store, an orchestrator state machine, the Linear&nbsp;⇄&nbsp;agent adapters, and the system prompts. Everything hard is delegated.</p>
     </div>
     <div class="glue">
@@ -493,18 +493,19 @@
       </div>
       <div class="main rv">
         <div class="hud"><span class="corner"></span><pre>
-<span class="hi">clarify</span> ─ chat loop: questions answered in place; a change request escalates ─▶ <span class="hi">plan</span>
-
-<span class="hi">plan</span> ──▶ <span class="hi">await_approval</span> ⇄ plan     <span class="mut">revision loop — any feedback that isn't approval</span>
+<span class="hi">converse</span> (clarify)  <span class="mut">answers, websearch, plan drafts, and revisions all stay here</span>
                 │
-                └─ approve ──▶ <span class="hi">implement</span> ──▶ <span class="hi">done</span>
+                └─ agent emits <span class="mut">ACTION: implement</span> on a plan it already posted and you agreed to
+                                    │
+                                    ▼
+                              <span class="hi">implement</span> ──▶ <span class="hi">done</span>
                                     │
                                     └─ failure ──▶ <span class="hi">error</span>  <span class="mut">fail loud, retry by re-assigning</span>
 
 <span class="hi">done</span> ⇄ <span class="hi">review</span>      <span class="mut">question on a finished PR — report only, always returns to done</span>
 <span class="hi">done</span> ⇄ <span class="hi">implement</span>   <span class="mut">change request on a finished PR — updates it in place, same branch</span></pre></div>
-        <p>Which way a reply routes is decided by small, cheap <strong>Haiku classifiers</strong> on the host. Is this new issue a question or a change request? Is this follow-up a revision or a review ask? Each one is a raw API call that fails soft to the safest answer.</p>
-        <p>A plan can also come back as a <strong>decomposition</strong>: if the issue is too big, the planner returns a numbered split instead, and on approval Jarvis creates the sub-issues in Linear and assigns them to itself. Each one then runs this whole pipeline on its own.</p>
+        <p>Converse runs in two tiers: a host-side turn with no sandbox for reasoning and web search, escalating to a sandboxed turn only when the agent actually needs the repo. Which way a done-session reply routes is still decided by a small, cheap <strong>Haiku classifier</strong> on the host: is this follow-up a revision or a review ask? It's a raw API call that fails soft to the safest answer.</p>
+        <p>A plan can also come back as a <strong>decomposition</strong>: if the issue is too big, the planner returns a numbered split instead, and once it's agreed, Jarvis creates the sub-issues in Linear and assigns them to itself. Each one then runs this whole pipeline on its own.</p>
       </div>
     </div>
 
@@ -558,11 +559,11 @@
             <thead><tr><th>Task</th><th>Model</th><th>Turns</th><th>Job</th></tr></thead>
             <tbody>
             <tr><td>map</td><td>Sonnet</td><td class="num">20</td><td>One-time read-only survey of the repo, cached and injected into every later task.</td></tr>
-            <tr><td>plan</td><td>Sonnet</td><td class="num">25</td><td>Produce the plan a human will approve, returned verbatim to Linear.</td></tr>
-            <tr><td>revise</td><td>Sonnet</td><td class="num">25</td><td>Plan + human feedback → revised plan. Loops until approval.</td></tr>
-            <tr><td>implement</td><td>Sonnet / Opus</td><td class="num">120</td><td>Approved plan → code, tests, pushes, <code>gh pr create</code>. Final message must be exactly the PR URL.</td></tr>
+            <tr><td>converse</td><td>Sonnet</td><td class="num">30</td><td>The conversational turn: answers, websearch, plan drafts and revisions, and the call on whether the human agreed. Two tiers: a fast host-side pass with no sandbox, escalating to this sandboxed task only when the repo is actually needed.</td></tr>
+            <tr><td>plan</td><td>Sonnet</td><td class="num">25</td><td>Produce the plan, returned verbatim to Linear.</td></tr>
+            <tr><td>revise</td><td>Sonnet</td><td class="num">25</td><td>Plan + human feedback → revised plan.</td></tr>
+            <tr><td>implement</td><td>Sonnet / Opus</td><td class="num">120</td><td>Agreed plan → code, tests, pushes, <code>gh pr create</code>. Final message must be exactly the PR URL.</td></tr>
             <tr><td>review</td><td>Sonnet</td><td class="num">40</td><td>Self-review of large diffs, and on-demand PR review for follow-up questions.</td></tr>
-            <tr><td>chat</td><td>Sonnet</td><td class="num">15</td><td>Answer a question about the issue or repo. Read-only tools, $1 cap.</td></tr>
             </tbody>
           </table>
         </div>
@@ -599,8 +600,8 @@
         <dd>System prompt suffixes are byte-stable; per-run content (issue body, repo map, plan) goes in the goal instead, so the Agent SDK's prompt cache hits across every run. Bounded tasks also run at reduced reasoning effort to cut thinking-token spend.</dd>
       </div>
       <div class="spec-item rv">
-        <dt>approval is a regex</dt>
-        <dd>Deliberately. "Approve" and "stop" are keyword parsers, not classifiers; the known ceiling (sarcasm, odd phrasing) and the upgrade path are written next to the code. The subtler judgments (question vs. change, revise vs. review) do get a classifier, the cheapest one available.</dd>
+        <dt>the agent judges agreement, not a regex</dt>
+        <dd>Whether a posted plan has been agreed to is decided by the conversational agent itself, which emits <code>ACTION: implement</code> only once it's sure, in either the fast host-side turn or the sandboxed one. It refuses outright to implement a plan the human never even saw. "Stop" stays a deliberate exception: a keyword kill switch, not a judgment call, because a session close should never be a maybe. The remaining subtler judgment (revise vs. review on a finished PR) still gets a classifier, the cheapest one available.</dd>
       </div>
       <div class="spec-item rv">
         <dt>the empty branch push</dt>
@@ -632,7 +633,7 @@
       </div>
       <div class="spec-item rv">
         <dt>re-assignment is resume</dt>
-        <dd>Re-assigning an issue mints a new session, so the orchestrator first looks for the newest prior session on the same issue: finished with a PR → point at it; interrupted mid-implement → resume the branch, no re-approval; planned but unapproved → re-post the plan. A prior still running refuses the duplicate outright.</dd>
+        <dd>Re-assigning an issue mints a new session, so the orchestrator first looks for the newest prior session on the same issue: finished with a PR → point at it; interrupted mid-implement → resume the branch, no re-planning; planned but not yet agreed → re-post the plan. A prior still running refuses the duplicate outright.</dd>
       </div>
       <div class="spec-item rv">
         <dt>plan recovery from Linear itself</dt>
