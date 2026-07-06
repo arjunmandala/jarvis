@@ -9,8 +9,8 @@ import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask } fr
 import type { AgentTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
 import { prepareHistory, type ThreadFetcher } from "../history/history.ts";
-import { classifyIntent, classifyPrRevision } from "../agent/classify.ts";
-import { converseTask, parseConverseAction } from "../agent/converse.ts";
+import { classifyPrRevision } from "../agent/classify.ts";
+import { converseTask, parseConverseAction, type ConverseAction } from "../agent/converse.ts";
 import { runHostTurn as defaultRunHostTurn, type HostTurnResult } from "../agent/host-turn.ts";
 import { fetchImageAttachments } from "../linear/attachments.ts";
 import type { LinearClient } from "@linear/sdk";
@@ -477,7 +477,7 @@ export class Orchestrator {
   }
 
   // Shared action dispatch for both tiers. `implement` is guarded on a posted plan.
-  async #dispatchConverse(ctx: IssueContext, acts: Activities, action: string, body: string, costSuffix: string): Promise<void> {
+  async #dispatchConverse(ctx: IssueContext, acts: Activities, action: ConverseAction, body: string, costSuffix: string): Promise<void> {
     if (action === "implement") {
       const row = this.#store.get(ctx.agentSessionId);
       if (!row?.plan || !row.plan.trim()) {
@@ -499,7 +499,11 @@ export class Orchestrator {
     await acts.response(`${body}${costSuffix}`);
   }
 
-  // Called from onCreated/onClarifyPrompted: clone -> answer -> post as response.
+  // ponytail: dead code as of the converse-turn rewrite (Task 6) — nothing calls
+  // #runChat any more (chat now runs through #runConverseTurn/converseTask), but
+  // #finishChat below is still live: reconcile() replays a recovered Tier 1
+  // converse-sandbox result through it for any "clarify"-phase row. Left in place
+  // rather than deleted, since that's a broader cleanup than this task's scope.
   // Stays in phase "clarify" on both success and failure — a chat thread is meant
   // to stay conversational; unlike plan/implement, a failed answer is retried by
   // simply replying again, never wedged into "error".
@@ -543,20 +547,6 @@ export class Orchestrator {
     }
     console.log(`[phase] ${agentSessionId} clarify: answered (${text.length} chars)`);
     await acts.response(`${text}${costLine(result)}`);
-  }
-
-  // A reply on a session in "clarify": re-classify the new message and either
-  // continue chatting or escalate into the normal plan pipeline — the same
-  // decision onCreated makes for a fresh session.
-  async #onClarifyPrompted(ctx: IssueContext, row: SessionRow, replyText: string, acts: Activities): Promise<void> {
-    const intent = await classifyIntent(this.#config.anthropicApiKey, replyText);
-    if (intent === "change") {
-      console.log(`[phase] ${ctx.agentSessionId} clarify -> plan (escalated by reply)`);
-      this.#store.upsert(ctx.agentSessionId, "plan", ctx.issueId);
-      await this.#runPlan(ctx, acts, row.branch);
-      return;
-    }
-    await this.#runChat(ctx, acts, row.branch);
   }
 
   // Called from onCreated: clone -> one-time repo map -> plan.
@@ -671,93 +661,44 @@ export class Orchestrator {
     );
   }
 
-  // prompted: a reply arrived while awaiting approval.
+  // prompted: a reply arrived pre-implementation (clarify, or a legacy
+  // await_approval row from before this feature shipped).
   // Contract: every path logs AND posts an activity — a session that receives
   // a prompt and emits nothing is marked unresponsive by Linear (10s rule).
   async onPrompted(ctx: IssueContext, replyText: string): Promise<void> {
     const acts = this.#makeActs(ctx.agentSessionId);
     const row = this.#store.get(ctx.agentSessionId);
 
-    if (row?.phase === "clarify") {
-      await this.#onClarifyPrompted(ctx, row, replyText, acts);
+    // done-with-PR follow-up keeps its existing path.
+    if (row?.phase === "done" && row.prUrl) {
+      await this.#onDoneFollowUp(ctx, row, replyText, acts);
       return;
     }
 
-    if (!row || row.phase !== "await_approval") {
-      // Terminal activities only — a `thought` would leave Linear stuck on "working".
-      const phase = row?.phase ?? "unknown";
-      if (phase === "done" && row?.prUrl) {
-        await this.#onDoneFollowUp(ctx, row, replyText, acts);
+    // The conversational phase: clarify (and legacy await_approval rows post-deploy).
+    if (row && (row.phase === "clarify" || row.phase === "await_approval")) {
+      // Deterministic stop stays a keyword check — do not leave a kill to agent judgment.
+      if (parseStopGate(replyText)) {
+        console.log(`[phase] ${ctx.agentSessionId} stop requested — closing session`);
+        this.#store.setPhase(ctx.agentSessionId, "done");
+        await acts.response("Stopped. Re-assign the issue when you want me to pick this up again.").catch(() => undefined);
         return;
       }
-      console.log(`[skip] ${ctx.agentSessionId} prompted but phase=${phase} — replying with status`);
-      if (phase === "done") {
-        await acts.response("This task is already done — re-assign the issue to start something new.");
-      } else {
-        await acts.error(
-          `This session is in state \`${phase}\` and can't continue (it was likely interrupted). ` +
-            `Re-assign the issue to me to start over.`,
-        );
-      }
+      await this.#runConverseTurn(ctx, acts, replyText);
       return;
     }
-    const approved = parseApprovalGate(replyText);
-    if (!approved && parseStopGate(replyText)) {
-      console.log(`[phase] ${ctx.agentSessionId} stop requested — closing session`);
-      try {
-        await acts.response("Stopped. Re-assign the issue when you want me to plan again.");
-      } catch (err) {
-        console.error(`[phase] ${ctx.agentSessionId} failed to post stop activity: ${err instanceof Error ? err.message : String(err)}`);
-      } finally {
-        this.#store.setPhase(ctx.agentSessionId, "done");
-      }
-      return;
-    }
-    // Hoisted above the approved/not-approved branch: both the revision path
-    // (feedback) and the implement path (approved) need the current plan.
-    let plan = row.plan;
-    if (!plan || !plan.trim()) {
-      plan = await recoverPlan(this.#store, ctx.agentSessionId, this.#fetchPlan);
-    }
-    if (!plan || !plan.trim()) {
-      console.error(`[phase] ${ctx.agentSessionId} plan is missing — refusing to proceed blind`);
-      await this.#failLoud(
-        ctx.agentSessionId, acts,
-        "I lost the plan for this session (likely a restart before it was saved). Re-assign the issue and I'll plan again.",
+
+    // Terminal / interrupted phases — unchanged status replies.
+    const phase = row?.phase ?? "unknown";
+    console.log(`[skip] ${ctx.agentSessionId} prompted but phase=${phase} — replying with status`);
+    if (phase === "done") {
+      await acts.response("This task is already done — re-assign the issue to start something new.");
+    } else {
+      await acts.error(
+        `This session is in state \`${phase}\` and can't continue (it was likely interrupted). ` +
+          `Re-assign the issue to me to start over.`,
       );
-      return;
     }
-
-    if (!approved) {
-      console.log(`[phase] ${ctx.agentSessionId} reply parsed as feedback — revising the plan`);
-      // Same phase as the original plan run so boot reconciliation recovers a
-      // revision run exactly like a plan run (re-attaches, calls #finishPlan).
-      this.#store.setPhase(ctx.agentSessionId, "plan");
-      await acts.thought("Revising the plan per your feedback…");
-
-      const map = this.#store.getRepoMap(this.#config.targetRepo);
-      const result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
-        this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
-        await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), row.branch);
-        const history = await this.#timed(ctx.agentSessionId, "history", () =>
-          prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
-        );
-        const images = await this.#extractImages(ctx, history);
-        return this.#trackedRun(ctx.agentSessionId, "revise", sbx, reviseTask(ctx, plan, replyText, map, history, images), acts);
-      });
-
-      await this.#finishPlan(ctx.agentSessionId, acts, result);
-      return;
-    }
-
-    const decomposition = parseDecomposition(plan);
-    if (decomposition) {
-      await this.#createSubIssues(ctx, acts, decomposition);
-      return;
-    }
-    await acts.thought("Approved — implementing in a sandbox now.");
-    await this.#runImplement(ctx, acts, plan, row.branch, this.#workBranchFor(ctx.issueId, ctx.agentSessionId));
-    return;
   }
 
   // Make the work branch visible on the remote immediately — before the agent

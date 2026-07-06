@@ -111,48 +111,10 @@ describe("onPrompted never goes silent", () => {
     store.close();
   });
 
-  it("posts an error and sets phase=error when approved but plan is missing", async () => {
-    const store = new SessionStore(":memory:");
-    store.upsert("as_p3", "await_approval", "iss");
-    const log: string[] = [];
-    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
-    await orch.onPrompted(ctxFor("as_p3"), "approve");
-    expect(log.some((l) => l.startsWith("error:"))).toBe(true);
-    expect(store.get("as_p3")?.phase).toBe("error");
-    store.close();
-  });
-
-  // Non-approval, non-stop feedback now drives a plan-revision run inside
-  // withSandbox (clone + runAgent), same as onCreated's plan run — there's no
-  // seam to fake e2b here, so this path is covered by live acceptance, not a
-  // unit test (matches the repo's convention for withSandbox/e2b paths).
-});
-
-describe("onPrompted plan recovery from Linear", () => {
-  it("still errors (no sandbox call) when the plan is missing and fetchPlan returns null", async () => {
-    const store = new SessionStore(":memory:");
-    store.upsert("as_r1", "await_approval", "iss");
-    const log: string[] = [];
-    const fetchPlan = async () => null;
-    const orch = new Orchestrator({} as Config, store, () => fakeActs(log), fetchPlan);
-    await orch.onPrompted(ctxFor("as_r1"), "approve");
-    expect(log.some((l) => l.startsWith("error:"))).toBe(true);
-    expect(store.get("as_r1")?.phase).toBe("error");
-    expect(store.get("as_r1")?.plan).toBeFalsy();
-    store.close();
-  });
-
-  it("still errors (no sandbox call) when the plan is missing and fetchPlan is not provided", async () => {
-    const store = new SessionStore(":memory:");
-    store.upsert("as_r2", "await_approval", "iss");
-    const log: string[] = [];
-    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
-    await orch.onPrompted(ctxFor("as_r2"), "approve");
-    expect(log.some((l) => l.startsWith("error:"))).toBe(true);
-    expect(store.get("as_r2")?.phase).toBe("error");
-    store.close();
-  });
-
+  // Non-approval/approval keyword parsing on a pre-implementation reply is gone
+  // (see "onPrompted: conversational gate" below) — replies now always run a
+  // converse turn, whose plan-missing guard lives in #dispatchConverse and is
+  // covered there, not by a deterministic pre-check in onPrompted itself.
 });
 
 describe("reconcile", () => {
@@ -906,22 +868,24 @@ describe("sub-issue decomposition", () => {
     };
   }
 
+  // Approval is no longer a regex keyword — the conversational turn decides the
+  // "implement" action (here faked via runHostTurn), and #dispatchConverse's
+  // existing decomposition check (unchanged by this feature) takes it from there.
   it("posts the decomposition as an elicitation instead of a normal plan", async () => {
     const store = new SessionStore(":memory:");
     store.upsert("as_d1", "await_approval", "iss");
-    store.setPlan("as_d1", "placeholder"); // pre-existing row so onPrompted's plan-missing guard doesn't fire
-    const log: string[] = [];
-    const orch = new Orchestrator({} as Config, store, () => fakeActs(log));
-    // Directly exercise #finishPlan's public seam via reconcile-style call: call
-    // onPrompted is not the right seam for finishPlan; instead assert through
-    // the documented, exported behavior — simulate approval on an already
-    // decomposition-shaped stored plan and confirm no sandbox/implement path
-    // is taken (createIssue is called, not implementTask).
     store.setPlan("as_d1", "Decomposition:\n1. A — do a.\n2. B — do b.\n");
+    const log: string[] = [];
     const created: string[] = [];
     const linear = fakeLinear(created);
-    const orch2 = new Orchestrator({} as Config, store, () => fakeActs(log), undefined, undefined, undefined, () => linear);
-    await orch2.onPrompted(ctxFor("as_d1"), "approve");
+    const runHostTurn: RunHostTurn = async () => ({
+      text: "ACTION: implement\nOn it.", action: "implement", body: "On it.", sessionId: null, costUsd: null,
+    });
+    const orch = new Orchestrator(
+      { targetRepo: "o/r" } as Config, store, () => fakeActs(log),
+      undefined, undefined, undefined, () => linear, undefined, undefined, undefined, runHostTurn,
+    );
+    await orch.onPrompted(ctxFor("as_d1"), "approve");
     expect(created).toEqual(["A", "B"]);
     expect(store.get("as_d1")?.phase).toBe("done");
     expect(log.some((l) => l.startsWith("response:") && l.includes("sub-issue"))).toBe(true);
@@ -933,10 +897,79 @@ describe("sub-issue decomposition", () => {
     store.upsert("as_d2", "await_approval", "iss");
     store.setPlan("as_d2", "Decomposition:\n1. A — do a.\n");
     const log: string[] = [];
-    const orch = new Orchestrator({} as Config, store, () => fakeActs(log)); // no linear client passed
+    const runHostTurn: RunHostTurn = async () => ({
+      text: "ACTION: implement\nOn it.", action: "implement", body: "On it.", sessionId: null, costUsd: null,
+    });
+    const orch = new Orchestrator(
+      { targetRepo: "o/r" } as Config, store, () => fakeActs(log), // no linear client passed
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, runHostTurn,
+    );
     await orch.onPrompted(ctxFor("as_d2"), "approve");
     expect(store.get("as_d2")?.phase).toBe("done");
     expect(log.some((l) => l.startsWith("response:"))).toBe(true);
+    store.close();
+  });
+});
+
+describe("onPrompted: conversational gate (no regex)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("'yeah ship it' implements when a plan was posted (no regex)", async () => {
+    const store = new SessionStore(":memory:");
+    const log: string[] = [];
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      runHostTurn: async () => ({
+        text: "ACTION: implement\nOn it.", action: "implement", body: "On it.", sessionId: "sdk-2", costUsd: 0.001,
+      }),
+      result: { kind: "result", subtype: "success", text: "https://github.com/o/r/pull/9", costUsd: 0.4, sessionId: "s9", usage: {}, numTurns: 3 },
+    });
+    store.upsert("s1", "clarify", "iss");
+    store.setPlan("s1", "Type: feature\nScope: small\n- do the thing");
+    await orch.onPrompted(ctxFor("s1", "yeah ship it"), "yeah ship it");
+    // Implement ran to completion (no regex gate involved): PR announced, phase done.
+    expect(log.some((l) => l.startsWith("response:") && /PR opened/i.test(l))).toBe(true);
+    expect(store.get("s1")?.phase).toBe("done");
+    expect(store.get("s1")?.prUrl).toBe("https://github.com/o/r/pull/9");
+    store.close();
+  });
+
+  it("implement action is refused when no plan was posted", async () => {
+    const store = new SessionStore(":memory:");
+    const log: string[] = [];
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      runHostTurn: async () => ({ text: "ACTION: implement\ngo", action: "implement", body: "go", sessionId: null, costUsd: null }),
+    });
+    store.upsert("s1", "clarify", "iss"); // no plan set
+    await orch.onPrompted(ctxFor("s1", "go go go"), "go go go");
+    expect((Sandbox.create as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(0); // never implemented
+    expect(log.some((l) => l.startsWith("response:") && l.includes("don't have an agreed plan"))).toBe(true);
+    expect(store.get("s1")?.phase).toBe("clarify");
+    store.close();
+  });
+
+  it("explicit 'stop' closes the session deterministically", async () => {
+    const store = new SessionStore(":memory:");
+    const log: string[] = [];
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      runHostTurn: async () => { throw new Error("host turn should not run on stop"); },
+    });
+    store.upsert("s1", "clarify", "iss");
+    await orch.onPrompted(ctxFor("s1", "stop"), "stop");
+    expect(store.get("s1")?.phase).toBe("done");
+    expect(log.some((l) => l.startsWith("response:") && /Stopped/i.test(l))).toBe(true);
+    store.close();
+  });
+
+  it("a legacy await_approval row runs a converse turn too (not the deleted regex path)", async () => {
+    const store = new SessionStore(":memory:");
+    const log: string[] = [];
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      runHostTurn: async () => ({ text: "ACTION: reply\nSure, one sec.", action: "reply", body: "Sure, one sec.", sessionId: "sdk-3", costUsd: 0.001 }),
+    });
+    store.upsert("s1", "await_approval", "iss"); // legacy row, pre-deploy
+    store.setPlan("s1", "Type: chore\nScope: small\n- x");
+    await orch.onPrompted(ctxFor("s1", "sounds good"), "sounds good");
+    expect(log.some((l) => l.startsWith("response:") && l.includes("Sure, one sec."))).toBe(true);
     store.close();
   });
 });
