@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { classifyIntent, pickWorkflowState } from "../../src/agent/classify.ts";
+import { classifyIntent, pickWorkflowState, classifyPrRevision } from "../../src/agent/classify.ts";
 
 function textResponse(text: string): Response {
   return new Response(JSON.stringify({ content: [{ type: "text", text }] }), {
@@ -57,5 +57,24 @@ describe("pickWorkflowState", () => {
     const fetchImpl = vi.fn(async () => new Response("", { status: 500 }));
     const result = await pickWorkflowState("key", "x", ["A", "B"], fetchImpl as unknown as typeof fetch);
     expect(result).toBe("A");
+  });
+});
+
+describe("classifyPrRevision", () => {
+  it("returns revise when the model says revise", async () => {
+    const fetchImpl = vi.fn(async () => textResponse("revise"));
+    const result = await classifyPrRevision("key", "please fix the null check", fetchImpl as unknown as typeof fetch);
+    expect(result).toBe("revise");
+  });
+
+  it("returns review when the model says review", async () => {
+    const fetchImpl = vi.fn(async () => textResponse("review"));
+    const result = await classifyPrRevision("key", "does this fix the bug?", fetchImpl as unknown as typeof fetch);
+    expect(result).toBe("review");
+  });
+
+  it("defaults to review on any failure (safe default — revise pushes commits to an open PR)", async () => {
+    const fetchImpl = vi.fn(async () => { throw new Error("network"); });
+    expect(await classifyPrRevision("key", "text", fetchImpl as unknown as typeof fetch)).toBe("review");
   });
 });

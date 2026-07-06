@@ -9,7 +9,7 @@ import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask } fr
 import type { AgentTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
 import { prepareHistory, type ThreadFetcher } from "../history/history.ts";
-import { classifyIntent } from "../agent/classify.ts";
+import { classifyIntent, classifyPrRevision } from "../agent/classify.ts";
 import { fetchImageAttachments } from "../linear/attachments.ts";
 import type { LinearClient } from "@linear/sdk";
 import { parseDecomposition } from "../agent/tasks.ts";
@@ -126,6 +126,7 @@ export class Orchestrator {
   #linearFor?: () => OrchestratorLinear;
   #getToken: () => string;
   #onUnauthorized?: () => Promise<string>;
+  #classifyFollowUp: (text: string) => Promise<"revise" | "review">;
   #jarvisActorId?: string;
   // Live runs: comments arriving while a run executes are injected into its
   // sandbox (steering). In-memory like the server's inflight set — a restart
@@ -146,6 +147,7 @@ export class Orchestrator {
     linearFor?: () => OrchestratorLinear,
     getToken?: () => string,
     onUnauthorized?: () => Promise<string>,
+    classifyFollowUp?: (text: string) => Promise<"revise" | "review">,
   ) {
     this.#config = config;
     this.#store = store;
@@ -157,6 +159,8 @@ export class Orchestrator {
     // (tests, and the transitional path before the token manager is threaded).
     this.#getToken = getToken ?? (() => this.#config.linear.accessToken ?? "");
     this.#onUnauthorized = onUnauthorized;
+    this.#classifyFollowUp =
+      classifyFollowUp ?? ((text) => classifyPrRevision(this.#config.anthropicApiKey, text));
     // Default: a real e2b reconnect. Tests inject a fake so nothing touches e2b/network.
     this.#connect =
       connect ??
@@ -834,7 +838,8 @@ export class Orchestrator {
       await acts.response("Understood — closing this out. The PR is waiting on human review.");
       return;
     }
-    if (parseChangeRequestGate(replyText)) {
+    const intent = await this.#classifyFollowUp(replyText);
+    if (intent === "revise") {
       return this.#reviseOnBranch(ctx, row, replyText, acts);
     }
     return this.#runReview(ctx, row, replyText, acts);
@@ -1076,5 +1081,4 @@ export class Orchestrator {
 import {
   parseApproval as parseApprovalGate,
   parseStop as parseStopGate,
-  parseChangeRequest as parseChangeRequestGate,
 } from "../linear/context.ts";

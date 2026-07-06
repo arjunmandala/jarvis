@@ -61,6 +61,29 @@ export async function classifyIntent(
   return word?.toLowerCase().startsWith("chat") ? "chat" : "change";
 }
 
+const PR_REVISION_SYSTEM =
+  "The human is replying on a thread of a PR you already opened. Reply with exactly one word: `revise` if " +
+  'they ask for code changes to the PR (fix, rework, address review comments, "this is wrong", "please ' +
+  'change X"), or `review` if it is a question, explanation request, or review-only remark needing no code ' +
+  'change (e.g. "what does this do", "looks good", "can you review"). No punctuation, no other text.';
+
+// ponytail: same LLM-heuristic ceiling as classifyIntent — replaces the former
+// parseChangeRequest regex, which misfired on questions containing a change
+// verb (e.g. "does this fix the bug?" read as a change request). Return
+// "revise" ONLY on an explicit `revise` reply; everything else — an
+// unrecognized reply, a network failure, a non-OK response — defaults to
+// "review". Unlike classifyIntent's "change" default, "review" is the safe
+// failure mode here because "revise" pushes commits onto an already-open PR;
+// a false positive mutates the PR, a false negative just costs a re-ask.
+export async function classifyPrRevision(
+  apiKey: string,
+  text: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<"revise" | "review"> {
+  const word = await askClassifier(apiKey, PR_REVISION_SYSTEM, text, fetchImpl);
+  return word?.toLowerCase().startsWith("revise") ? "revise" : "review";
+}
+
 // Disambiguates among 2+ same-category workflow state names (see
 // src/linear/workflow.ts). Falls back to the first candidate on any failure or
 // unrecognized reply — still a valid state in the right category.

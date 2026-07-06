@@ -383,7 +383,7 @@ describe("recoverPlan", () => {
 function makeOrchWithFakeSandbox(
   store: SessionStore,
   log: string[],
-  opts: { result?: unknown },
+  opts: { result?: unknown; classifyFollowUp?: (text: string) => Promise<"revise" | "review"> },
 ): Orchestrator {
   const resultJson = opts.result ? JSON.stringify(opts.result) : "{}";
   const fakeSbx = {
@@ -399,7 +399,11 @@ function makeOrchWithFakeSandbox(
     kill: async () => undefined,
   };
   vi.spyOn(Sandbox, "create").mockResolvedValue(fakeSbx as unknown as Sandbox);
-  return new Orchestrator({ targetRepo: "o/r", linear: { accessToken: "" } } as Config, store, () => fakeActs(log));
+  return new Orchestrator(
+    { targetRepo: "o/r", linear: { accessToken: "" } } as Config, store, () => fakeActs(log),
+    undefined, undefined, undefined, undefined, undefined, undefined,
+    opts.classifyFollowUp,
+  );
 }
 
 describe("onCreated resume", () => {
@@ -712,6 +716,7 @@ describe("on-demand review on done sessions", () => {
     const log: string[] = [];
     const orch = makeOrchWithFakeSandbox(store, log, {
       result: { kind: "result", subtype: "success", text: "https://github.com/o/r/pull/3", costUsd: 0.2, sessionId: "s", usage: {}, numTurns: 4 },
+      classifyFollowUp: async () => "revise",
     });
     await orch.onPrompted(ctxFor("as_od4"), "this is wrong, please fix the null check");
     // Implement path ran (PR announced), session back to done, branch preserved.
@@ -730,6 +735,7 @@ describe("on-demand review on done sessions", () => {
     const report = "## Review\n\nlooks fine\n\n_Report only — no changes were made._";
     const orch = makeOrchWithFakeSandbox(store, log, {
       result: { kind: "result", subtype: "success", text: report, costUsd: null, sessionId: null },
+      classifyFollowUp: async () => "review",
     });
     await orch.onPrompted(ctxFor("as_od5"), "what does this change do?");
     expect(log.some((l) => l.startsWith("response:") && l.includes("Review"))).toBe(true);

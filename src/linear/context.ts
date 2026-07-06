@@ -67,23 +67,6 @@ export function parseStop(text: string): boolean {
   return STOP.test(text) && !STOP_NEGATED.test(text);
 }
 
-// A reply on a DONE session with an open PR: does it ask for code CHANGES
-// (a rejection, "fix this", "address the comments") or is it a review/question?
-// A change request routes back into implement on the existing work branch — the
-// open PR updates when the new commits are pushed (GitHub's native behavior, no
-// Linear↔GitHub wiring). Anything else stays on the read-only review path.
-// Biased NARROW on purpose: a false positive spends a whole implement run
-// ($3-8), while a false negative just yields a review the human can re-ask.
-// ponytail: keyword heuristic, same ceiling as parseApproval — sarcasm/edge
-// phrasing slips through. Upgrade path: a tiny classifier call if misroutes bite.
-const CHANGE_REQUEST =
-  /\b(fix|redo|revise|rework|reject(?:ed)?|address\s+(?:the\s+)?(?:pr\s+)?comments?|make\s+(?:the\s+|these\s+)?changes?|change\s+it|doesn'?t\s+work|does\s+not\s+work|don'?t\s+work|is\s+wrong|not\s+right|not\s+working)\b/i;
-
-export function parseChangeRequest(text: string): boolean {
-  if (parseStop(text)) return false;
-  return CHANGE_REQUEST.test(text);
-}
-
 // Trust boundary: this string is interpolated into `git clone -b <name> ...`
 // (see cloneRepo in src/sandbox/session.ts). Validate BEFORE storing or
 // passing it anywhere near a shell command — never after.
