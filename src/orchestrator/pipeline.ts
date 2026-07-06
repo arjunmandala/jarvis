@@ -112,6 +112,9 @@ export class Orchestrator {
   #onUnauthorized?: () => Promise<string>;
   #classifyFollowUp: (text: string) => Promise<"revise" | "review">;
   #runHostTurn: typeof defaultRunHostTurn;
+  // Soft-fail parent-issue fetch (makeParentFetcher). Advisory: null/absent just
+  // means no parent context — never blocks a run.
+  #fetchParent?: (issueId: string) => Promise<{ id: string; title: string; description: string } | null>;
   #jarvisActorId?: string;
   // Live runs: comments arriving while a run executes are injected into its
   // sandbox (steering). In-memory like the server's inflight set — a restart
@@ -134,6 +137,7 @@ export class Orchestrator {
     onUnauthorized?: () => Promise<string>,
     classifyFollowUp?: (text: string) => Promise<"revise" | "review">,
     runHostTurn?: typeof defaultRunHostTurn,
+    fetchParent?: (issueId: string) => Promise<{ id: string; title: string; description: string } | null>,
   ) {
     this.#config = config;
     this.#store = store;
@@ -147,6 +151,7 @@ export class Orchestrator {
     this.#classifyFollowUp =
       classifyFollowUp ?? ((text) => classifyPrRevision(this.#config.anthropicApiKey, text));
     this.#runHostTurn = runHostTurn ?? defaultRunHostTurn;
+    this.#fetchParent = fetchParent;
     // Default: a real e2b reconnect. Tests inject a fake so nothing touches e2b/network.
     this.#connect =
       connect ??
@@ -217,6 +222,25 @@ export class Orchestrator {
     const text = `${ctx.description}\n${ctx.comment}\n${history ?? ""}`;
     const images = await fetchImageAttachments(this.#getToken, text, fetch, this.#onUnauthorized);
     return images.length > 0 ? images : undefined;
+  }
+
+  // Fill ctx.parent* for a sub-issue when the webhook payload didn't nest it.
+  // Mutates ctx in place so every downstream task (converse/plan/implement/…)
+  // sees the parent via issueBlock. Advisory end-to-end: fetcher missing, no
+  // issue id, already-hydrated, no parent, or any throw → ctx is left as-is.
+  async #hydrateParent(ctx: IssueContext): Promise<void> {
+    if (!this.#fetchParent || !ctx.issueId || ctx.parentTitle) return;
+    try {
+      const parent = await this.#fetchParent(ctx.issueId);
+      if (parent) {
+        ctx.parentId = parent.id;
+        ctx.parentTitle = parent.title;
+        ctx.parentDescription = parent.description;
+        console.log(`[parent] ${ctx.agentSessionId} hydrated parent context from ${parent.id}`);
+      }
+    } catch (err) {
+      console.error(`[parent] ${ctx.agentSessionId} parent fetch failed (advisory): ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   #record(runId: number | null, e: JarvisEvent): void {
@@ -328,6 +352,12 @@ export class Orchestrator {
   // branch) -> post as elicitation -> await approval
   async onCreated(ctx: IssueContext): Promise<void> {
     const acts = this.#makeActs(ctx.agentSessionId);
+
+    // Give a sub-issue context about its parent (title + description). Skip when
+    // the payload already carried it (parentTitle set by extractContext) or there
+    // is no issue id. Advisory: any failure logs `[parent]` and the run proceeds
+    // with no parent context — same posture as history.
+    await this.#hydrateParent(ctx);
 
     // Re-assigning an issue mints a NEW agentSessionId. Recover durable state from
     // the latest prior session for this issue that saved a plan, so we don't
@@ -579,6 +609,9 @@ export class Orchestrator {
       return;
     }
     const assigneeId = await this.#getJarvisActorId();
+    // Carry parent context into each child's description so it's present even
+    // before makeParentFetcher runs on the child's own `created` webhook. One line.
+    const parentRef = ctx.title ? `_Part of parent issue: ${ctx.title}_\n\n` : "";
     const created: string[] = [];
     for (const item of items) {
       try {
@@ -586,7 +619,7 @@ export class Orchestrator {
           parentId: ctx.issueId ?? undefined,
           teamId: ctx.teamId,
           title: item.title,
-          description: item.description,
+          description: `${parentRef}${item.description}`,
           assigneeId,
         });
         const issue = await payload.issue;

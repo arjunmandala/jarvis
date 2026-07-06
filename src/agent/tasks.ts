@@ -123,8 +123,18 @@ const IMPLEMENT_APPEND =
   TOOLING_APPEND +
   CONVERSE_APPEND;
 
+// Parent-issue context for a sub-issue. Per-run content (goal, not systemAppend).
+// Renders nothing for a top-level issue (no parentTitle), so every task's goal is
+// byte-identical to before whenever there's no parent — prompt-cache safe.
+export function parentBlock(ctx: IssueContext): string {
+  if (!ctx.parentTitle) return "";
+  const desc = ctx.parentDescription ? `\n${ctx.parentDescription}` : "";
+  return `Parent issue: ${ctx.parentTitle}${desc}\n\n`;
+}
+
 export function issueBlock(ctx: IssueContext): string {
   return (
+    parentBlock(ctx) +
     `Linear issue: ${ctx.title}\n\n${ctx.description}\n\n` +
     (ctx.comment ? `Latest comment: ${ctx.comment}\n\n` : "") +
     (ctx.promptContext ? `Context:\n${ctx.promptContext}\n` : "")

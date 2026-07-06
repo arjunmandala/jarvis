@@ -10,6 +10,13 @@ export interface IssueContext {
   description: string;
   comment: string;
   promptContext: string;
+  // Parent-issue context for a sub-issue (child). Populated either straight from
+  // the webhook payload when Linear nests `issue.parent`, or by a soft-fail
+  // GraphQL fetch in the orchestrator (makeParentFetcher) when it doesn't.
+  // Absent for a top-level issue — parentBlock renders nothing.
+  parentId?: string;
+  parentTitle?: string;
+  parentDescription?: string;
 }
 
 function asRecord(x: unknown): Record<string, unknown> {
@@ -22,6 +29,10 @@ export function extractContext(payload: unknown): IssueContext {
   const issue = asRecord(session.issue);
   const team = asRecord(issue.team);
   const comment = asRecord(session.comment);
+  // Linear MAY nest the parent under issue.parent; when it does we take it for
+  // free. When it doesn't, these stay undefined and the orchestrator's
+  // makeParentFetcher fills them in (see onCreated).
+  const parent = asRecord(issue.parent);
   return {
     agentSessionId: String(session.id ?? ""),
     organizationId: String(p.organizationId ?? ""),
@@ -31,6 +42,13 @@ export function extractContext(payload: unknown): IssueContext {
     description: String(issue.description ?? ""),
     comment: String(comment.body ?? ""),
     promptContext: String(session.promptContext ?? ""),
+    ...(parent.id
+      ? {
+          parentId: String(parent.id),
+          parentTitle: String(parent.title ?? ""),
+          parentDescription: String(parent.description ?? ""),
+        }
+      : {}),
   };
 }
 

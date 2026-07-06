@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { LinearWebhookClient } from "@linear/sdk/webhooks";
 import type { Config } from "./config.ts";
 import { SessionStore } from "./store/sessions.ts";
-import { makeLinearClient, makePlanFetcher, makeThreadFetcher } from "./linear/client.ts";
+import { makeLinearClient, makePlanFetcher, makeThreadFetcher, makeParentFetcher } from "./linear/client.ts";
 import { makeActivities } from "./linear/activities.ts";
 import { extractContext, promptedBody } from "./linear/context.ts";
 import { Orchestrator } from "./orchestrator/pipeline.ts";
@@ -43,6 +43,9 @@ export function makeServer(config: Config): Hono {
     linearFor,
     getToken,
     onUnauthorized,
+    undefined, // classifyFollowUp: default Haiku classifier
+    undefined, // runHostTurn: default host-side turn
+    makeParentFetcher(getToken, fetch, onUnauthorized),
   );
 
   // Boot reconciliation: recover or fail-loud every session left in-flight by a

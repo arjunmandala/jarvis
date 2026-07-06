@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask, parseDecomposition } from "../../src/agent/tasks.ts";
+import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask, parseDecomposition, parentBlock, issueBlock } from "../../src/agent/tasks.ts";
 import type { IssueContext } from "../../src/linear/context.ts";
 
 const ctx: IssueContext = {
@@ -335,6 +335,49 @@ describe("parseDecomposition", () => {
 
   it("tolerates leading whitespace before Decomposition:", () => {
     expect(parseDecomposition("  \nDecomposition:\n1. A — b.\n")).not.toBeNull();
+  });
+});
+
+describe("parentBlock / parent context", () => {
+  const childCtx: IssueContext = {
+    ...ctx,
+    title: "Wire the API",
+    description: "persist settings",
+    parentId: "iss_parent",
+    parentTitle: "Settings epic",
+    parentDescription: "let users configure everything",
+  };
+
+  it("renders parent title + description when present", () => {
+    const block = parentBlock(childCtx);
+    expect(block).toContain("Parent issue: Settings epic");
+    expect(block).toContain("let users configure everything");
+  });
+
+  it("renders nothing for a top-level issue (no parent)", () => {
+    expect(parentBlock(ctx)).toBe("");
+  });
+
+  it("issueBlock puts the parent block ahead of the issue for a sub-issue", () => {
+    const block = issueBlock(childCtx);
+    expect(block).toContain("Parent issue: Settings epic");
+    expect(block.indexOf("Parent issue:")).toBeLessThan(block.indexOf("Linear issue:"));
+  });
+
+  it("every task builder carries the parent block into its goal", () => {
+    expect(planTask(childCtx).goal).toContain("Parent issue: Settings epic");
+    expect(reviseTask(childCtx, "p", "f").goal).toContain("Parent issue: Settings epic");
+    expect(implementTask(childCtx, "Type: chore\nScope: small\np").goal).toContain("Parent issue: Settings epic");
+    expect(reviewTask(childCtx, "https://github.com/o/r/pull/1", null, null).goal).toContain("Parent issue: Settings epic");
+  });
+
+  it("goal is byte-identical to before when there is no parent (cache-safe)", () => {
+    // ctx has no parent fields → parentBlock empty → goal unchanged.
+    expect(planTask(ctx).goal).not.toContain("Parent issue:");
+  });
+
+  it("never touches systemAppend", () => {
+    expect(planTask(childCtx).systemAppend).toBe(planTask(ctx).systemAppend);
   });
 });
 

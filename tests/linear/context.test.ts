@@ -54,6 +54,33 @@ describe("extractContext", () => {
     const ctx = extractContext({ agentSession: { id: "as_2" } });
     expect(ctx.teamId).toBeNull();
   });
+
+  it("reads a nested issue.parent when the payload carries one", () => {
+    const ctx = extractContext({
+      organizationId: "org_1",
+      agentSession: {
+        id: "as_1",
+        issue: {
+          id: "iss_child",
+          title: "child",
+          description: "d",
+          parent: { id: "iss_parent", title: "Epic", description: "the epic body" },
+        },
+      },
+    });
+    expect(ctx.parentId).toBe("iss_parent");
+    expect(ctx.parentTitle).toBe("Epic");
+    expect(ctx.parentDescription).toBe("the epic body");
+  });
+
+  it("leaves parent fields undefined for a top-level issue", () => {
+    const ctx = extractContext({
+      agentSession: { id: "as_1", issue: { id: "iss_1", title: "t", description: "d" } },
+    });
+    expect(ctx.parentId).toBeUndefined();
+    expect(ctx.parentTitle).toBeUndefined();
+    expect(ctx.parentDescription).toBeUndefined();
+  });
 });
 
 describe("promptedBody", () => {

@@ -98,6 +98,59 @@ export function makePlanFetcher(
   };
 }
 
+const PARENT_QUERY = `query($id: String!) { issue(id: $id) { parent { id title description } } }`;
+
+interface ParentQueryResponse {
+  data?: {
+    issue?: {
+      parent?: { id?: string; title?: string; description?: string } | null;
+    } | null;
+  } | null;
+  errors?: unknown;
+}
+
+export interface ParentIssue {
+  id: string;
+  title: string;
+  description: string;
+}
+
+/**
+ * Fetch a sub-issue's parent (title + description) directly from Linear, for the
+ * common case where the webhook payload doesn't nest issue.parent. Same failure
+ * contract as makePlanFetcher/makeThreadFetcher: null on any error, and null when
+ * the issue has no parent (a top-level issue) — advisory, never blocks a run.
+ */
+export function makeParentFetcher(
+  token: TokenSource,
+  fetchImpl: typeof fetch = fetch,
+  onUnauthorized?: () => Promise<string>,
+): (issueId: string) => Promise<ParentIssue | null> {
+  return async (issueId: string): Promise<ParentIssue | null> => {
+    try {
+      const res = await fetchWithAuth(
+        "https://api.linear.app/graphql",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ query: PARENT_QUERY, variables: { id: issueId } }),
+        },
+        token,
+        fetchImpl,
+        onUnauthorized,
+      );
+      if (!res.ok) return null;
+      const json = (await res.json()) as ParentQueryResponse;
+      if (json.errors) return null;
+      const parent = json.data?.issue?.parent;
+      if (!parent?.id) return null;
+      return { id: parent.id, title: parent.title ?? "", description: parent.description ?? "" };
+    } catch {
+      return null;
+    }
+  };
+}
+
 const THREAD_QUERY = `query($id: String!) { agentSession(id: $id) { activities(first: 250) { nodes { content { __typename ... on AgentActivityPromptContent { body } ... on AgentActivityResponseContent { body } ... on AgentActivityErrorContent { body } ... on AgentActivityElicitationContent { body } } } } } }`;
 
 // Visible-thread speakers only. thought/action are telemetry noise — the raw

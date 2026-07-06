@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { makePlanFetcher, makeThreadFetcher } from "../../src/linear/client.ts";
+import { makePlanFetcher, makeThreadFetcher, makeParentFetcher } from "../../src/linear/client.ts";
 import { APPROVAL_FOOTER } from "../../src/linear/context.ts";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -120,6 +120,39 @@ describe("makePlanFetcher", () => {
     const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     const auth = init.headers as Record<string, string>;
     expect(auth.authorization).toBe("Bearer getter-token");
+  });
+});
+
+describe("makeParentFetcher", () => {
+  it("returns the parent id/title/description (happy path)", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ data: { issue: { parent: { id: "iss_parent", title: "Epic", description: "the epic body" } } } }),
+    );
+    const fetchParent = makeParentFetcher("token-123", fetchImpl as unknown as typeof fetch);
+    expect(await fetchParent("iss_child")).toEqual({ id: "iss_parent", title: "Epic", description: "the epic body" });
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://api.linear.app/graphql");
+    const body = JSON.parse(init.body as string);
+    expect(body.variables).toEqual({ id: "iss_child" });
+    expect(body.query).toContain("parent");
+  });
+
+  it("returns null when the issue has no parent (top-level issue)", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ data: { issue: { parent: null } } }));
+    const fetchParent = makeParentFetcher("token-123", fetchImpl as unknown as typeof fetch);
+    expect(await fetchParent("iss_top")).toBeNull();
+  });
+
+  it("returns null on HTTP failure, GraphQL errors, and thrown fetch", async () => {
+    const cases: Array<() => Promise<Response>> = [
+      async () => jsonResponse({ data: {} }, 500),
+      async () => jsonResponse({ errors: [{ message: "bad" }] }),
+      async () => { throw new Error("network down"); },
+    ];
+    for (const impl of cases) {
+      const fetchParent = makeParentFetcher("token-123", vi.fn(impl) as unknown as typeof fetch);
+      expect(await fetchParent("iss_child")).toBeNull();
+    }
   });
 });
 

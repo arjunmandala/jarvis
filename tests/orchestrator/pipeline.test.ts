@@ -339,6 +339,7 @@ function makeOrchWithFakeSandbox(
     result?: unknown;
     classifyFollowUp?: (text: string) => Promise<"revise" | "review">;
     runHostTurn?: RunHostTurn;
+    fetchParent?: (issueId: string) => Promise<{ id: string; title: string; description: string } | null>;
   },
 ): Orchestrator {
   const resultJson = opts.result ? JSON.stringify(opts.result) : "{}";
@@ -360,6 +361,7 @@ function makeOrchWithFakeSandbox(
     undefined, undefined, undefined, undefined, undefined, undefined,
     opts.classifyFollowUp,
     opts.runHostTurn,
+    opts.fetchParent,
   );
 }
 
@@ -413,6 +415,38 @@ describe("onCreated converse (two-tier)", () => {
     expect(log.some((l) => l.startsWith("response:") && l.includes("add the endpoint"))).toBe(true);
     expect(log.some((l) => l.includes("ACTION:"))).toBe(false); // tag not leaked
     expect(store.get("s1")?.phase).toBe("clarify");
+    store.close();
+  });
+
+  it("hydrates parent context onto a sub-issue's ctx via the parent fetcher", async () => {
+    const store = new SessionStore(":memory:");
+    const log: string[] = [];
+    const fetchParent = vi.fn(async () => ({ id: "iss_parent", title: "Epic: checkout", description: "the whole checkout flow" }));
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      fetchParent,
+      runHostTurn: async () => ({ text: "ACTION: reply\nok", action: "reply", body: "ok", sessionId: null, costUsd: null }),
+    });
+    const ctx = ctxFor("s_child", "child work");
+    await orch.onCreated(ctx);
+    // The fetcher was consulted for the child's issue id and mutated ctx in place,
+    // so every downstream task (issueBlock → parentBlock) now carries the parent.
+    expect(fetchParent).toHaveBeenCalledWith("iss");
+    expect(ctx.parentTitle).toBe("Epic: checkout");
+    expect(ctx.parentDescription).toBe("the whole checkout flow");
+    store.close();
+  });
+
+  it("does not fetch a parent when the payload already carried one", async () => {
+    const store = new SessionStore(":memory:");
+    const log: string[] = [];
+    const fetchParent = vi.fn(async () => ({ id: "x", title: "y", description: "z" }));
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      fetchParent,
+      runHostTurn: async () => ({ text: "ACTION: reply\nok", action: "reply", body: "ok", sessionId: null, costUsd: null }),
+    });
+    const ctx = { ...ctxFor("s_child2", "child"), parentTitle: "already here" };
+    await orch.onCreated(ctx);
+    expect(fetchParent).not.toHaveBeenCalled();
     store.close();
   });
 });
