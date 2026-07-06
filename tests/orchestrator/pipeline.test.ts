@@ -6,6 +6,9 @@ import type { Activities } from "../../src/linear/activities.ts";
 import type { IssueContext } from "../../src/linear/context.ts";
 import type { Config } from "../../src/config.ts";
 import type { LinearClient } from "@linear/sdk";
+import type { runHostTurn } from "../../src/agent/host-turn.ts";
+
+type RunHostTurn = typeof runHostTurn;
 
 describe("nextPhase", () => {
   it("clarify -> plan", () => expect(nextPhase("clarify", false)).toBe("plan"));
@@ -46,14 +49,14 @@ function fakeActs(log: string[]): Activities {
   };
 }
 
-function ctxFor(id: string): IssueContext {
+function ctxFor(id: string, message?: string): IssueContext {
   return {
     agentSessionId: id,
     organizationId: "org",
     issueId: "iss",
     teamId: "team_1",
-    title: "t",
-    description: "d",
+    title: message ?? "t",
+    description: message ? "" : "d",
     comment: "",
     promptContext: "",
   };
@@ -383,7 +386,11 @@ describe("recoverPlan", () => {
 function makeOrchWithFakeSandbox(
   store: SessionStore,
   log: string[],
-  opts: { result?: unknown; classifyFollowUp?: (text: string) => Promise<"revise" | "review"> },
+  opts: {
+    result?: unknown;
+    classifyFollowUp?: (text: string) => Promise<"revise" | "review">;
+    runHostTurn?: RunHostTurn;
+  },
 ): Orchestrator {
   const resultJson = opts.result ? JSON.stringify(opts.result) : "{}";
   const fakeSbx = {
@@ -403,8 +410,34 @@ function makeOrchWithFakeSandbox(
     { targetRepo: "o/r", linear: { accessToken: "" } } as Config, store, () => fakeActs(log),
     undefined, undefined, undefined, undefined, undefined, undefined,
     opts.classifyFollowUp,
+    opts.runHostTurn,
   );
 }
+
+describe("onCreated converse (two-tier)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("a question is answered by a host turn with no sandbox", async () => {
+    const store = new SessionStore(":memory:");
+    const log: string[] = [];
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      runHostTurn: async () => ({
+        text: "ACTION: reply\nBecause JSONB.",
+        action: "reply",
+        body: "Because JSONB.",
+        sessionId: "sdk-1",
+        costUsd: 0.001,
+      }),
+    });
+    await orch.onCreated(ctxFor("s1", "Why Postgres?"));
+    expect(log.some((l) => l.startsWith("response:") && l.includes("Because JSONB."))).toBe(true);
+    // Tier 0 stayed on the host — no sandbox was ever created.
+    expect((Sandbox.create as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(0);
+    expect(store.get("s1")?.phase).toBe("clarify");
+    expect(store.get("s1")?.sdkSessionId).toBe("sdk-1");
+    store.close();
+  });
+});
 
 describe("onCreated resume", () => {
   afterEach(() => vi.restoreAllMocks());

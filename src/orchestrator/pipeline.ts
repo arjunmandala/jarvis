@@ -10,6 +10,8 @@ import type { AgentTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
 import { prepareHistory, type ThreadFetcher } from "../history/history.ts";
 import { classifyIntent, classifyPrRevision } from "../agent/classify.ts";
+import { converseTask, parseConverseAction } from "../agent/converse.ts";
+import { runHostTurn as defaultRunHostTurn, type HostTurnResult } from "../agent/host-turn.ts";
 import { fetchImageAttachments } from "../linear/attachments.ts";
 import type { LinearClient } from "@linear/sdk";
 import { parseDecomposition } from "../agent/tasks.ts";
@@ -127,6 +129,7 @@ export class Orchestrator {
   #getToken: () => string;
   #onUnauthorized?: () => Promise<string>;
   #classifyFollowUp: (text: string) => Promise<"revise" | "review">;
+  #runHostTurn: typeof defaultRunHostTurn;
   #jarvisActorId?: string;
   // Live runs: comments arriving while a run executes are injected into its
   // sandbox (steering). In-memory like the server's inflight set — a restart
@@ -148,6 +151,7 @@ export class Orchestrator {
     getToken?: () => string,
     onUnauthorized?: () => Promise<string>,
     classifyFollowUp?: (text: string) => Promise<"revise" | "review">,
+    runHostTurn?: typeof defaultRunHostTurn,
   ) {
     this.#config = config;
     this.#store = store;
@@ -161,6 +165,7 @@ export class Orchestrator {
     this.#onUnauthorized = onUnauthorized;
     this.#classifyFollowUp =
       classifyFollowUp ?? ((text) => classifyPrRevision(this.#config.anthropicApiKey, text));
+    this.#runHostTurn = runHostTurn ?? defaultRunHostTurn;
     // Default: a real e2b reconnect. Tests inject a fake so nothing touches e2b/network.
     this.#connect =
       connect ??
@@ -418,13 +423,80 @@ export class Orchestrator {
       }
     }
 
-    const intent = await classifyIntent(this.#config.anthropicApiKey, `${ctx.title}\n\n${ctx.description}\n\n${ctx.comment}`);
-    if (intent === "chat") {
-      await this.#runChat(ctx, acts, null);
+    this.#store.upsert(ctx.agentSessionId, "clarify", ctx.issueId);
+    await this.#runConverseTurn(ctx, acts, `${ctx.title}\n\n${ctx.description}\n\n${ctx.comment}`.trim());
+  }
+
+  // One conversational turn. Tier 0 runs on the host (no sandbox); if the agent
+  // needs the repo (need_repo) or we already know it will (forceRepo), run Tier 1
+  // in a sandbox. Both tiers converge on #dispatchConverse below.
+  async #runConverseTurn(ctx: IssueContext, acts: Activities, userMessage: string, forceRepo = false): Promise<void> {
+    const history = ctx.issueId ? await this.#fetchThread?.(ctx.issueId).catch(() => "") : "";
+
+    let action: HostTurnResult["action"];
+    let body: string;
+    let sessionId: string | null = null;
+    let costUsd: number | null = null;
+
+    if (!forceRepo) {
+      await acts.thought("Thinking…");
+      const r: HostTurnResult = await this.#runHostTurn({
+        apiKey: this.#config.anthropicApiKey, ctx, userMessage, history: history || undefined,
+      });
+      ({ action, body, sessionId, costUsd } = r);
+    } else {
+      action = "need_repo"; body = ""; // jump straight to Tier 1
+    }
+
+    if (action === "need_repo") {
+      await acts.thought("Let me pull up the code…");
+      const map = this.#store.getRepoMap(this.#config.targetRepo);
+      const result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
+        this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
+        await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), this.#store.get(ctx.agentSessionId)?.branch ?? null);
+        const hist = await this.#timed(ctx.agentSessionId, "history", () =>
+          prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread));
+        const images = await this.#extractImages(ctx, hist);
+        return this.#trackedRun(ctx.agentSessionId, "converse", sbx, converseTask(ctx, userMessage, map, hist, images), acts);
+      });
+      this.#store.setSandbox(ctx.agentSessionId, null);
+      const text = result?.kind === "result" && result.text ? result.text : "";
+      if (result?.kind === "result" && result.sessionId) this.#store.setSdkSessionId(ctx.agentSessionId, result.sessionId);
+      if (!text) {
+        await acts.error("I couldn't work that out — reply again to retry.").catch(() => undefined);
+        return; // stays in clarify, retryable
+      }
+      const parsed = parseConverseAction(text);
+      await this.#dispatchConverse(ctx, acts, parsed.action, parsed.body, costLine(result));
       return;
     }
-    this.#store.upsert(ctx.agentSessionId, "plan", ctx.issueId);
-    await this.#runPlan(ctx, acts, null);
+
+    if (sessionId) this.#store.setSdkSessionId(ctx.agentSessionId, sessionId);
+    const cost = costUsd != null ? `\n\n_Cost: $${costUsd.toFixed(4)}_` : "";
+    await this.#dispatchConverse(ctx, acts, action, body, cost);
+  }
+
+  // Shared action dispatch for both tiers. `implement` is guarded on a posted plan.
+  async #dispatchConverse(ctx: IssueContext, acts: Activities, action: string, body: string, costSuffix: string): Promise<void> {
+    if (action === "implement") {
+      const row = this.#store.get(ctx.agentSessionId);
+      if (!row?.plan || !row.plan.trim()) {
+        await acts.response("I don't have an agreed plan yet — let me lay one out first, then I'll build it.");
+        return; // stays in clarify
+      }
+      const decomposition = parseDecomposition(row.plan);
+      if (decomposition) { await this.#createSubIssues(ctx, acts, decomposition); return; }
+      await acts.thought(body || "On it — implementing now.");
+      await this.#runImplement(ctx, acts, row.plan, row.branch, this.#workBranchFor(ctx.issueId, ctx.agentSessionId));
+      return;
+    }
+    if (action === "plan") {
+      this.#store.setPlan(ctx.agentSessionId, body);
+      await acts.response(`${body}${costSuffix}`);
+      return; // b2: posting a plan is just a message; no approval gate
+    }
+    // reply (and any unknown) — post and keep talking
+    await acts.response(`${body}${costSuffix}`);
   }
 
   // Called from onCreated/onClarifyPrompted: clone -> answer -> post as response.
