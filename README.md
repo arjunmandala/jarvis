@@ -25,23 +25,33 @@ Linear issue assigned  ──►  webhook  ──►  Orchestrator  ──►  E
 ```
 src/
 ├── index.ts              # entrypoint: load config, start the Hono server
-├── server.ts              # Linear webhook receiver + routing + /oauth/callback
-├── config.ts               # env var loading/validation
-├── report.ts                # `npm run report` — failure-pattern mining over jarvis.db
+├── server.ts             # Linear webhook receiver + routing + /oauth/callback
+├── config.ts             # env var loading/validation
+├── logger.ts             # console.log/error tag-coloring patch
+├── report.ts             # `npm run report` entrypoint
+├── report/
+│   ├── data.ts           # gathers report data from jarvis.db (failure patterns, economics)
+│   └── html.ts           # renders the jarvis-report.html dashboard
 ├── orchestrator/
-│   └── pipeline.ts            # the phase state machine (clarify→plan→implement→done)
+│   └── pipeline.ts       # the phase state machine (clarify→plan→implement→done)
 ├── agent/
-│   ├── tasks.ts                 # prompt/task builders (plan / revise / implement / map)
-│   ├── events.ts                 # newline-delimited JSON event parsing
-│   └── runner.mjs                 # runs INSIDE the E2B sandbox (Claude Agent SDK loop)
+│   ├── tasks.ts          # task builders (map / plan / revise / implement / review / chat)
+│   ├── classify.ts       # host-side Haiku classifiers (chat-vs-plan, revise-vs-review, workflow state)
+│   ├── events.ts         # newline-delimited JSON event parsing
+│   └── runner.mjs        # runs INSIDE the E2B sandbox (Claude Agent SDK loop)
 ├── sandbox/
-│   └── session.ts                  # E2B lifecycle, host↔sandbox file/stream protocol
+│   └── session.ts        # E2B lifecycle, host↔sandbox file/stream protocol
+├── history/
+│   └── history.ts        # same-issue memory: thread text + prior run streams into the sandbox
 ├── linear/
-│   ├── client.ts                    # LinearClient + plan-recovery GraphQL query
-│   ├── activities.ts                 # thought/action/response/error/elicitation posts
-│   └── context.ts                     # webhook payload parsing, approve/stop parsing
+│   ├── client.ts         # LinearClient + plan/thread-recovery GraphQL queries
+│   ├── activities.ts     # thought/action/response/error/elicitation posts
+│   ├── context.ts        # webhook payload parsing, approve/stop parsing
+│   ├── token-manager.ts  # auto-renewing Linear app-actor OAuth token
+│   ├── workflow.ts       # moves the Linear issue's status as phases advance
+│   └── attachments.ts    # downloads Linear image uploads for agent tasks
 └── store/
-    └── sessions.ts                    # SQLite: sessions, repo_maps, runs, run_events
+    └── sessions.ts       # SQLite: sessions, repo_maps, runs, run_events, session_events, team_states, oauth_tokens
 
 e2b/build-template.ts   # builds the `jarvis-agent` E2B template (bakes in runner.mjs)
 tests/                  # vitest, mirrors src/ layout
@@ -104,4 +114,5 @@ npm run dev        # run the server with a file watcher, loading .env
 npm run typecheck  # tsc --noEmit
 npm test           # run the test suite once
 npm run test:watch # run the test suite in watch mode
+npm run report     # failure-pattern + economics report (console + jarvis-report.html)
 ```

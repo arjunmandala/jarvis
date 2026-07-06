@@ -75,6 +75,8 @@ Linear issue assigned to Jarvis
 │ Orchestrator (src/orchestrator/pipeline.ts) — phase state machine   │
 │                                                                      │
 │  onCreated(ctx)                                                     │
+│    ├─ findResumableByIssue? → resume prior plan/branch/PR (below)   │
+│    ├─ classifyIntent (Haiku): question → chatTask, stays "clarify"  │
 │    ├─ store.upsert(session, "plan")                                 │
 │    ├─ withSandbox: e2b sandbox up → cloneRepo(TARGET_REPO)          │
 │    ├─ first time in repo? run mapTask() → cache in repo_maps table  │
@@ -120,8 +122,19 @@ clarify → plan → await_approval ⇄ plan (revision loop, feedback ≠ approv
                                           └─ failure → error
 
 done ⇄ review (reply on a finished session with a PR — report-only, always returns to done)
-    └─ done ⇄ implement (reply parsed as a change request — updates the open PR in place on the existing work branch; questions/review requests take the report-only `review` path)
+    └─ done ⇄ implement (reply classified as a change request — updates the open PR in place on the existing work branch; questions/review requests take the report-only `review` path)
 ```
+`clarify` is a real resting state, not just the implicit start: `onCreated` runs
+`classifyIntent` (a host-side Haiku call, `src/agent/classify.ts`) over the issue
+text — a question routes to `chatTask` and the session stays in `clarify` (each
+reply is re-classified and can escalate to `plan`); a change request goes straight
+to `plan`. The done-session follow-up split (`revise` vs report-only `review`) is
+likewise a Haiku call (`classifyPrRevision`), defaulting to the safe `review` path.
+
+A plan may also come back as a `Decomposition:` list (the plan agent's escape hatch
+for an oversized issue, parsed by `parseDecomposition`). It's posted for approval
+like any plan; on approval Jarvis creates the sub-issues in Linear and self-assigns
+them — each then arrives as its own `created` webhook — instead of implementing.
 State lives in SQLite (`sessions` table), keyed by Linear's `agentSessionId`. A
 restart loses nothing except live-steering ability for runs that were mid-flight
 (`#live` is in-memory) — `reconcile()` picks those back up from `sandboxId` +
@@ -199,9 +212,9 @@ only; upgrade path for cross-issue memory is a host-side retrieval tool.
 
 ### Agent tasks (`src/agent/tasks.ts`)
 
-Five task builders, each an `AgentTask` (goal / model / allowed tools / turn+budget
-caps) fed to `runner.mjs`. `mapTask()` is deliberately the odd one out (Read/Glob/Grep
-only — one-time, read-only repo survey); every other task shares the same
+Six task builders, each an `AgentTask` (goal / model / allowed tools / turn+budget
+caps) fed to `runner.mjs`. `mapTask()` and `chatTask()` are deliberately read-only
+(Read/Glob/Grep, plus serena for chat); every other task shares the same
 `ALL_REPO_TOOLS` list (Read/Glob/Grep/Bash/Edit/Write/Monitor/WebSearch/WebFetch/
 `mcp__serena`/Skill/Agent/ask_user) so the agent never hits a tool wall mid-task — the
 difference between plan/revise/review/implement is the goal text, model, and turn
@@ -214,6 +227,12 @@ cap, not the tool list:
 | `reviseTask()` | sonnet-5 | 25 | plan + human feedback → revised plan |
 | `implementTask()` | sonnet-5 **or** opus-4-8 (routed) | 120 | approved plan → code, tests, push, `gh pr create`; final message must be exactly the PR URL, or `PR_FAILED: <reason>`. Takes an optional `workBranch`: when set (a resumed run), it pins that branch (`git checkout -B <workBranch> origin/<workBranch> \|\| git checkout -b <workBranch>`) instead of branching fresh, and pushes after each meaningful step rather than once at the end, so a mid-run death leaves recoverable work on the remote |
 | `reviewTask()` | sonnet-5 | 40 | self-review of big diffs + on-demand PR review; final message = the report |
+| `chatTask()` | sonnet-5 | 15 | answers a question about the issue/repo (clarify phase) — read-only tools, $1 cap, session stays conversational |
+
+Every task can carry `images`: screenshots pasted into Linear arrive as markdown
+links to `uploads.linear.app`, downloaded host-side by `fetchImageAttachments`
+(`src/linear/attachments.ts`, capped at 5 images / 5 MB each, advisory — a failed
+download is skipped, never thrown) and passed to the agent as image content blocks.
 
 Each task also carries an `effort` hint (`map`=low, `plan`/`revise`/`review`=medium,
 `implement`=high) — the Agent SDK default is `high`; lowering it on bounded tasks cuts
@@ -244,15 +263,31 @@ fixed contract `Type: <…>` / `Scope: <small|large>`; `implementTask` parses th
   parsers (`parseApproval`, `parseStop`) gating the state machine. These are
   intentionally a regex heuristic, not a classifier — see the `ponytail:` comment
   in the file for the known ceiling (sarcasm/edge phrasing) and upgrade path.
+- `token-manager.ts` — `LinearTokenManager`, the automatic app-actor token renewal
+  described under Runtime prerequisites above.
+- `attachments.ts` — extracts + downloads Linear image uploads for task `images`
+  (see Agent tasks above).
+- `workflow.ts` — moves the Linear issue's workflow status at four moments
+  (`plan_start`, `implement_start`, `pr_opened`, `done`), matching by Linear's
+  standardized state *category* (stable across teams) with a Haiku tiebreak
+  (`pickWorkflowState`) when a category has several states. Team states are cached
+  in SQLite (`team_states`). Advisory end-to-end — a failure never blocks a run,
+  and there's deliberately no "error" transition.
+
+The narrow host-side classification decisions above (chat-vs-plan, revise-vs-review,
+workflow-state tiebreak) live in `src/agent/classify.ts`: raw `fetch` calls to the
+Messages API on Haiku, no SDK, no sandbox — every one fails soft to a safe default.
 
 ### Persistence (`src/store/sessions.ts`, SQLite via `node:sqlite`)
 
-Five tables, no ORM: `sessions` (one row per Linear agent session — phase, plan,
+Seven tables, no ORM: `sessions` (one row per Linear agent session — phase, plan,
 sandboxId), `repo_maps` (one row per target repo, cached architecture map),
 `runs` (one row per agent invocation — cost/tokens/outcome), `run_events` (raw
 `JarvisEvent` stream per run, for `npm run report`'s failure-pattern mining),
 `session_events` (phase transitions + host timings per session — approval dwell,
-created→PR, and sandbox_create/clone/serena_index/history durations for the report).
+created→PR, and sandbox_create/clone/serena_index/history durations for the report),
+`team_states` (cached Linear workflow states per team), `oauth_tokens` (the
+auto-renewed Linear app-actor token).
 Column migrations are hand-rolled (`ALTER TABLE ... ADD COLUMN` guarded by a
 `pragma_table_info` check) since SQLite has no `ADD COLUMN IF NOT EXISTS`.
 
