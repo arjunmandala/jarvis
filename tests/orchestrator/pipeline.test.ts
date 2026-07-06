@@ -703,6 +703,41 @@ describe("on-demand review on done sessions", () => {
     store.close();
   });
 
+  it("routes a change request on a done+PR session into implement on the same branch", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_od4", "done", "iss");
+    store.setPrUrl("as_od4", "https://github.com/o/r/pull/3");
+    store.setPlan("as_od4", "Type: bug\nScope: small\n\n## Plan\n- fix it");
+    store.setWorkBranch("as_od4", "jarvis/iss");
+    const log: string[] = [];
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      result: { kind: "result", subtype: "success", text: "https://github.com/o/r/pull/3", costUsd: 0.2, sessionId: "s", usage: {}, numTurns: 4 },
+    });
+    await orch.onPrompted(ctxFor("as_od4"), "this is wrong, please fix the null check");
+    // Implement path ran (PR announced), session back to done, branch preserved.
+    expect(log.some((l) => l.startsWith("response:") && /PR opened/i.test(l))).toBe(true);
+    expect(store.get("as_od4")?.phase).toBe("done");
+    expect(store.get("as_od4")?.workBranch).toBe("jarvis/iss");
+    store.close();
+  });
+
+  it("a plain question on a done+PR session still runs the review path", async () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("as_od5", "done", "iss");
+    store.setPrUrl("as_od5", "https://github.com/o/r/pull/4");
+    store.setPlan("as_od5", "Type: bug\nScope: small\n\n## Plan\n- fix it");
+    const log: string[] = [];
+    const report = "## Review\n\nlooks fine\n\n_Report only — no changes were made._";
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      result: { kind: "result", subtype: "success", text: report, costUsd: null, sessionId: null },
+    });
+    await orch.onPrompted(ctxFor("as_od5"), "what does this change do?");
+    expect(log.some((l) => l.startsWith("response:") && l.includes("Review"))).toBe(true);
+    expect(log.some((l) => /PR opened/i.test(l))).toBe(false);
+    expect(store.get("as_od5")?.phase).toBe("done");
+    store.close();
+  });
+
   it("reconcile finishes a review row: report posted, review stored, phase done", async () => {
     const store = new SessionStore(":memory:");
     store.upsert("as_od3", "review", "iss");

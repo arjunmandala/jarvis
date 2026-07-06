@@ -824,16 +824,23 @@ export class Orchestrator {
     }
   }
 
-  // A reply on a finished session that has a PR: conversational follow-up.
-  // "stop" closes politely; anything else runs a review agent against the PR
-  // diff with the user's message as steering ("review this" reviews; a
-  // question gets answered in the diff's context).
+  // A reply on a finished session that has a PR. "stop" closes politely; a clear
+  // change request (rejected/commented PR) reworks the PR on its branch; anything
+  // else runs the read-only review agent against the PR diff.
   async #onDoneFollowUp(ctx: IssueContext, row: SessionRow, replyText: string, acts: Activities): Promise<void> {
     if (parseStopGate(replyText)) {
       console.log(`[phase] ${ctx.agentSessionId} done follow-up: stop — staying done`);
       await acts.response("Understood — closing this out. The PR is waiting on human review.");
       return;
     }
+    if (parseChangeRequestGate(replyText)) {
+      return this.#reviseOnBranch(ctx, row, replyText, acts);
+    }
+    return this.#runReview(ctx, row, replyText, acts);
+  }
+
+  // Read-only review of the PR diff (unchanged from the prior inline body).
+  async #runReview(ctx: IssueContext, row: SessionRow, replyText: string, acts: Activities): Promise<void> {
     console.log(`[phase] ${ctx.agentSessionId} done → review (follow-up on ${row.prUrl})`);
     this.#store.setPhase(ctx.agentSessionId, "review");
     // Fire-and-forget: thought is one-shot telemetry, and a rejection here
@@ -854,6 +861,38 @@ export class Orchestrator {
       console.error(`[review] ${ctx.agentSessionId} review run failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     await this.#finishReview(ctx.agentSessionId, acts, result);
+  }
+
+  // A done-session follow-up asking for code changes (a rejected/commented PR).
+  // Resume implement on the SAME work branch — it already carries the PR's
+  // commits, and pushing to it updates the open PR in place (no Linear↔GitHub
+  // wiring). Plan + PR URL + the human's feedback are folded into the goal, and
+  // the agent is REQUIRED to fetch and address the GitHub PR comments first via
+  // `gh pr view <url> --comments` — so the human never repeats on Linear what
+  // they already said on GitHub.
+  async #reviseOnBranch(ctx: IssueContext, row: SessionRow, feedback: string, acts: Activities): Promise<void> {
+    if (!row.plan) {
+      // Nothing to revise against — fall back to the read-only review path.
+      console.log(`[phase] ${ctx.agentSessionId} change request but no saved plan — reviewing instead`);
+      return this.#runReview(ctx, row, feedback, acts);
+    }
+    const workBranch = row.workBranch ?? this.#workBranchFor(ctx.issueId, ctx.agentSessionId);
+    console.log(`[phase] ${ctx.agentSessionId} done → implement (PR revision on ${workBranch})`);
+    await acts.thought("Got it — reworking the PR on its branch…");
+    // Append the revision request AFTER the plan so routeImplement still reads
+    // the plan's Type:/Scope: header from the top 400 chars.
+    const revisedPlan =
+      `${row.plan}\n\n---\nPR REVISION REQUESTED\n` +
+      `The PR ${row.prUrl} was reviewed and changes were requested. Work on the existing branch ` +
+      `(it already has the PR's commits — build on them, do not restart), push your changes, and the ` +
+      `open PR updates automatically — do NOT open a second PR.\n` +
+      `FIRST, run \`gh pr view ${row.prUrl} --comments\` and read every review comment and thread on the PR. ` +
+      `Address ALL of them — the human should never have to repeat in Linear what they already said on GitHub. ` +
+      `If there are no PR comments, work from the requested changes below alone.\n\n` +
+      `Requested changes:\n${feedback}`;
+    // baseBranch=null: clone the default branch; implementTask's branchBlock then
+    // checks out origin/<workBranch> (the PR's commits) and builds on them.
+    await this.#runImplement(ctx, acts, revisedPlan, null, workBranch);
   }
 
   // Review always returns the session to done — a failed review is retryable
@@ -1036,4 +1075,5 @@ export class Orchestrator {
 import {
   parseApproval as parseApprovalGate,
   parseStop as parseStopGate,
+  parseChangeRequest as parseChangeRequestGate,
 } from "../linear/context.ts";
