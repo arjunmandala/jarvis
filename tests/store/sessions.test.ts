@@ -211,6 +211,17 @@ describe("work branch", () => {
   });
 });
 
+describe("sdk_session_id column", () => {
+  it("sdkSessionId round-trips and defaults to null", () => {
+    const store = new SessionStore(":memory:");
+    store.upsert("s1", "clarify", "issue-1");
+    expect(store.get("s1")?.sdkSessionId).toBe(null);
+    store.setSdkSessionId("s1", "sdk-abc");
+    expect(store.get("s1")?.sdkSessionId).toBe("sdk-abc");
+    store.close();
+  });
+});
+
 describe("findResumableByIssue", () => {
   it("returns the latest prior session with a plan for the issue, excluding the current one", () => {
     const store = new SessionStore(":memory:");

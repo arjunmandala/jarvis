@@ -5,11 +5,13 @@ import type { IssueContext } from "../linear/context.ts";
 import { APPROVAL_FOOTER, isValidBranchName } from "../linear/context.ts";
 import { withSandbox, cloneRepo, runAgent, watchDetached, injectMessage, runCommand, redactSecret, REPO_DIR, type AgentSandbox } from "../sandbox/session.ts";
 import { Sandbox } from "e2b";
-import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask } from "../agent/tasks.ts";
+import { planTask, implementTask, mapTask, reviseTask, reviewTask } from "../agent/tasks.ts";
 import type { AgentTask } from "../agent/tasks.ts";
 import type { JarvisEvent } from "../agent/events.ts";
 import { prepareHistory, type ThreadFetcher } from "../history/history.ts";
-import { classifyIntent, classifyPrRevision } from "../agent/classify.ts";
+import { classifyPrRevision } from "../agent/classify.ts";
+import { converseTask, parseConverseAction, type ConverseAction } from "../agent/converse.ts";
+import { runHostTurn as defaultRunHostTurn, type HostTurnResult } from "../agent/host-turn.ts";
 import { fetchImageAttachments } from "../linear/attachments.ts";
 import type { LinearClient } from "@linear/sdk";
 import { parseDecomposition } from "../agent/tasks.ts";
@@ -70,23 +72,6 @@ export function toolParameter(input: unknown): string {
   return json && json !== "{}" && json !== "null" ? json.slice(0, 200) : "";
 }
 
-// Extracted so it can be unit-tested without entering withSandbox/e2b: fetches
-// a missing plan via `fetchPlan`, persists it, and returns it — or null if
-// there's nothing to recover. Used by onPrompted before the missing-plan
-// error path.
-export async function recoverPlan(
-  store: Pick<SessionStore, "setPlan">,
-  agentSessionId: string,
-  fetchPlan: ((id: string) => Promise<string | null>) | undefined,
-): Promise<string | null> {
-  if (!fetchPlan) return null;
-  const recovered = await fetchPlan(agentSessionId);
-  if (!recovered || !recovered.trim()) return null;
-  console.log(`[recover] ${agentSessionId} recovered plan from Linear (${recovered.length} chars)`);
-  store.setPlan(agentSessionId, recovered);
-  return recovered;
-}
-
 // Result → runs-row mapping, shared by the live path (#logUsage) and reconcile
 // (which lost the in-memory runId across the restart and closes the row via
 // finishOpenRun instead).
@@ -117,7 +102,6 @@ export class Orchestrator {
   #config: Config;
   #store: SessionStore;
   #makeActs: (agentSessionId: string) => Activities;
-  #fetchPlan?: (agentSessionId: string) => Promise<string | null>;
   #fetchThread?: ThreadFetcher;
   #connect: (sandboxId: string) => Promise<Reconnected>;
   // A factory, not a static client: the OAuth token rotates (auto-renewal), so
@@ -127,6 +111,7 @@ export class Orchestrator {
   #getToken: () => string;
   #onUnauthorized?: () => Promise<string>;
   #classifyFollowUp: (text: string) => Promise<"revise" | "review">;
+  #runHostTurn: typeof defaultRunHostTurn;
   #jarvisActorId?: string;
   // Live runs: comments arriving while a run executes are injected into its
   // sandbox (steering). In-memory like the server's inflight set — a restart
@@ -148,11 +133,11 @@ export class Orchestrator {
     getToken?: () => string,
     onUnauthorized?: () => Promise<string>,
     classifyFollowUp?: (text: string) => Promise<"revise" | "review">,
+    runHostTurn?: typeof defaultRunHostTurn,
   ) {
     this.#config = config;
     this.#store = store;
     this.#makeActs = makeActs;
-    this.#fetchPlan = fetchPlan;
     this.#fetchThread = fetchThread;
     this.#linearFor = linearFor;
     // Fall back to the bootstrap .env token when no live token source is wired
@@ -161,6 +146,7 @@ export class Orchestrator {
     this.#onUnauthorized = onUnauthorized;
     this.#classifyFollowUp =
       classifyFollowUp ?? ((text) => classifyPrRevision(this.#config.anthropicApiKey, text));
+    this.#runHostTurn = runHostTurn ?? defaultRunHostTurn;
     // Default: a real e2b reconnect. Tests inject a fake so nothing touches e2b/network.
     this.#connect =
       connect ??
@@ -418,73 +404,91 @@ export class Orchestrator {
       }
     }
 
-    const intent = await classifyIntent(this.#config.anthropicApiKey, `${ctx.title}\n\n${ctx.description}\n\n${ctx.comment}`);
-    if (intent === "chat") {
-      await this.#runChat(ctx, acts, null);
-      return;
-    }
-    this.#store.upsert(ctx.agentSessionId, "plan", ctx.issueId);
-    await this.#runPlan(ctx, acts, null);
+    this.#store.upsert(ctx.agentSessionId, "clarify", ctx.issueId);
+    await this.#runConverseTurn(ctx, acts, `${ctx.title}\n\n${ctx.description}\n\n${ctx.comment}`.trim());
   }
 
-  // Called from onCreated/onClarifyPrompted: clone -> answer -> post as response.
-  // Stays in phase "clarify" on both success and failure — a chat thread is meant
-  // to stay conversational; unlike plan/implement, a failed answer is retried by
-  // simply replying again, never wedged into "error".
-  async #runChat(ctx: IssueContext, acts: Activities, branch: string | null): Promise<void> {
-    console.log(`[phase] ${ctx.agentSessionId} clarify: answering`);
-    await acts.thought("Reading the codebase to answer…");
-
-    let cloneFailed = false;
-    const result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
-      this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
-      try {
-        await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), branch);
-      } catch (err) {
-        cloneFailed = true;
-        console.error(`[phase] ${ctx.agentSessionId} chat clone failed: ${err instanceof Error ? err.message : String(err)}`);
-        return null;
-      }
-      const map = this.#store.getRepoMap(this.#config.targetRepo);
-      const history = await this.#timed(ctx.agentSessionId, "history", () =>
-        prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
-      );
-      const images = await this.#extractImages(ctx, history);
-      return this.#trackedRun(ctx.agentSessionId, "chat", sbx, chatTask(ctx, map, history, images), acts);
+  // One conversational turn. Tier 0 runs on the host (no sandbox); if the agent
+  // needs the repo (need_repo), run Tier 1 in a sandbox. Both tiers converge on
+  // #dispatchConverse below.
+  async #runConverseTurn(ctx: IssueContext, acts: Activities, userMessage: string): Promise<void> {
+    await acts.thought("Thinking…");
+    const history = ctx.issueId ? await this.#fetchThread?.(ctx.issueId).catch(() => "") : "";
+    const r: HostTurnResult = await this.#runHostTurn({
+      apiKey: this.#config.anthropicApiKey, ctx, userMessage, history: history || undefined,
     });
+    const { action, body, sessionId, costUsd } = r;
 
-    this.#store.setSandbox(ctx.agentSessionId, null);
-    if (cloneFailed) {
-      console.error(`[phase] ${ctx.agentSessionId} chat clone failed — staying in clarify`);
-      await acts.error("I couldn't clone the repository to answer that. Reply again to retry.").catch(() => undefined);
+    if (action === "need_repo") {
+      await acts.thought("Let me pull up the code…");
+      const map = this.#store.getRepoMap(this.#config.targetRepo);
+      const result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
+        this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
+        await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), this.#store.get(ctx.agentSessionId)?.branch ?? null);
+        const hist = await this.#timed(ctx.agentSessionId, "history", () =>
+          prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread));
+        const images = await this.#extractImages(ctx, hist);
+        return this.#trackedRun(ctx.agentSessionId, "converse", sbx, converseTask(ctx, userMessage, map, hist, images), acts);
+      });
+      this.#store.setSandbox(ctx.agentSessionId, null);
+      const text = result?.kind === "result" && result.text ? result.text : "";
+      if (result?.kind === "result" && result.sessionId) this.#store.setSdkSessionId(ctx.agentSessionId, result.sessionId);
+      if (!text) {
+        await acts.error("I couldn't work that out — reply again to retry.").catch(() => undefined);
+        return; // stays in clarify, retryable
+      }
+      const parsed = parseConverseAction(text);
+      await this.#dispatchConverse(ctx, acts, parsed.action, parsed.body, costLine(result));
       return;
     }
-    await this.#finishChat(ctx.agentSessionId, acts, result);
+
+    if (sessionId) this.#store.setSdkSessionId(ctx.agentSessionId, sessionId);
+    const cost = costUsd != null ? `\n\n_Cost: $${costUsd.toFixed(4)}_` : "";
+    await this.#dispatchConverse(ctx, acts, action, body, cost);
   }
 
-  async #finishChat(agentSessionId: string, acts: Activities, result: JarvisEvent | null): Promise<void> {
+  // Shared action dispatch for both tiers. `implement` is guarded on a posted plan.
+  async #dispatchConverse(ctx: IssueContext, acts: Activities, action: ConverseAction, body: string, costSuffix: string): Promise<void> {
+    if (action === "implement") {
+      const row = this.#store.get(ctx.agentSessionId);
+      if (!row?.plan || !row.plan.trim()) {
+        await acts.response("I don't have an agreed plan yet — let me lay one out first, then I'll build it.");
+        return; // stays in clarify
+      }
+      const decomposition = parseDecomposition(row.plan);
+      if (decomposition) { await this.#createSubIssues(ctx, acts, decomposition); return; }
+      await acts.thought(body || "On it — implementing now.");
+      await this.#runImplement(ctx, acts, row.plan, row.branch, this.#workBranchFor(ctx.issueId, ctx.agentSessionId));
+      return;
+    }
+    if (action === "plan") {
+      this.#store.setPlan(ctx.agentSessionId, body);
+      await acts.response(`${body}${costSuffix}`);
+      return; // b2: posting a plan is just a message; no approval gate
+    }
+    // reply (and any unknown) — post and keep talking
+    await acts.response(`${body}${costSuffix}`);
+  }
+
+  // #runChat (the old clarify-phase runner) was deleted as dead code in Task 7 —
+  // chat now runs through #runConverseTurn/converseTask. #finishConverse below is
+  // reconcile()'s counterpart: it replays a recovered Tier 1 converse-sandbox
+  // result through the SAME ACTION-parsing dispatch a live run uses (mirroring
+  // #runConverseTurn's need_repo branch), so a recovered `ACTION: plan`/
+  // `ACTION: implement` isn't silently dropped and a recovered `ACTION: reply`
+  // doesn't leak its raw tag to the human. Stays in phase "clarify" on failure —
+  // a chat thread is meant to stay conversational; unlike plan/implement, a
+  // failed answer is retried by simply replying again, never wedged into "error".
+  async #finishConverse(ctx: IssueContext, acts: Activities, result: JarvisEvent | null): Promise<void> {
     const text = result?.kind === "result" && result.text ? result.text.trim() : "";
     if (!text) {
-      console.error(`[phase] ${agentSessionId} chat run produced no answer`);
+      console.error(`[phase] ${ctx.agentSessionId} converse run produced no answer`);
       await acts.error("I couldn't answer that — reply again to retry.").catch(() => undefined);
       return; // stays in "clarify" — retryable by replying again
     }
-    console.log(`[phase] ${agentSessionId} clarify: answered (${text.length} chars)`);
-    await acts.response(`${text}${costLine(result)}`);
-  }
-
-  // A reply on a session in "clarify": re-classify the new message and either
-  // continue chatting or escalate into the normal plan pipeline — the same
-  // decision onCreated makes for a fresh session.
-  async #onClarifyPrompted(ctx: IssueContext, row: SessionRow, replyText: string, acts: Activities): Promise<void> {
-    const intent = await classifyIntent(this.#config.anthropicApiKey, replyText);
-    if (intent === "change") {
-      console.log(`[phase] ${ctx.agentSessionId} clarify -> plan (escalated by reply)`);
-      this.#store.upsert(ctx.agentSessionId, "plan", ctx.issueId);
-      await this.#runPlan(ctx, acts, row.branch);
-      return;
-    }
-    await this.#runChat(ctx, acts, row.branch);
+    console.log(`[phase] ${ctx.agentSessionId} clarify: recovered converse result (${text.length} chars)`);
+    const parsed = parseConverseAction(text);
+    await this.#dispatchConverse(ctx, acts, parsed.action, parsed.body, costLine(result));
   }
 
   // Called from onCreated: clone -> one-time repo map -> plan.
@@ -599,93 +603,44 @@ export class Orchestrator {
     );
   }
 
-  // prompted: a reply arrived while awaiting approval.
+  // prompted: a reply arrived pre-implementation (clarify, or a legacy
+  // await_approval row from before this feature shipped).
   // Contract: every path logs AND posts an activity — a session that receives
   // a prompt and emits nothing is marked unresponsive by Linear (10s rule).
   async onPrompted(ctx: IssueContext, replyText: string): Promise<void> {
     const acts = this.#makeActs(ctx.agentSessionId);
     const row = this.#store.get(ctx.agentSessionId);
 
-    if (row?.phase === "clarify") {
-      await this.#onClarifyPrompted(ctx, row, replyText, acts);
+    // done-with-PR follow-up keeps its existing path.
+    if (row?.phase === "done" && row.prUrl) {
+      await this.#onDoneFollowUp(ctx, row, replyText, acts);
       return;
     }
 
-    if (!row || row.phase !== "await_approval") {
-      // Terminal activities only — a `thought` would leave Linear stuck on "working".
-      const phase = row?.phase ?? "unknown";
-      if (phase === "done" && row?.prUrl) {
-        await this.#onDoneFollowUp(ctx, row, replyText, acts);
+    // The conversational phase: clarify (and legacy await_approval rows post-deploy).
+    if (row && (row.phase === "clarify" || row.phase === "await_approval")) {
+      // Deterministic stop stays a keyword check — do not leave a kill to agent judgment.
+      if (parseStopGate(replyText)) {
+        console.log(`[phase] ${ctx.agentSessionId} stop requested — closing session`);
+        this.#store.setPhase(ctx.agentSessionId, "done");
+        await acts.response("Stopped. Re-assign the issue when you want me to pick this up again.").catch(() => undefined);
         return;
       }
-      console.log(`[skip] ${ctx.agentSessionId} prompted but phase=${phase} — replying with status`);
-      if (phase === "done") {
-        await acts.response("This task is already done — re-assign the issue to start something new.");
-      } else {
-        await acts.error(
-          `This session is in state \`${phase}\` and can't continue (it was likely interrupted). ` +
-            `Re-assign the issue to me to start over.`,
-        );
-      }
+      await this.#runConverseTurn(ctx, acts, replyText);
       return;
     }
-    const approved = parseApprovalGate(replyText);
-    if (!approved && parseStopGate(replyText)) {
-      console.log(`[phase] ${ctx.agentSessionId} stop requested — closing session`);
-      try {
-        await acts.response("Stopped. Re-assign the issue when you want me to plan again.");
-      } catch (err) {
-        console.error(`[phase] ${ctx.agentSessionId} failed to post stop activity: ${err instanceof Error ? err.message : String(err)}`);
-      } finally {
-        this.#store.setPhase(ctx.agentSessionId, "done");
-      }
-      return;
-    }
-    // Hoisted above the approved/not-approved branch: both the revision path
-    // (feedback) and the implement path (approved) need the current plan.
-    let plan = row.plan;
-    if (!plan || !plan.trim()) {
-      plan = await recoverPlan(this.#store, ctx.agentSessionId, this.#fetchPlan);
-    }
-    if (!plan || !plan.trim()) {
-      console.error(`[phase] ${ctx.agentSessionId} plan is missing — refusing to proceed blind`);
-      await this.#failLoud(
-        ctx.agentSessionId, acts,
-        "I lost the plan for this session (likely a restart before it was saved). Re-assign the issue and I'll plan again.",
+
+    // Terminal / interrupted phases — unchanged status replies.
+    const phase = row?.phase ?? "unknown";
+    console.log(`[skip] ${ctx.agentSessionId} prompted but phase=${phase} — replying with status`);
+    if (phase === "done") {
+      await acts.response("This task is already done — re-assign the issue to start something new.");
+    } else {
+      await acts.error(
+        `This session is in state \`${phase}\` and can't continue (it was likely interrupted). ` +
+          `Re-assign the issue to me to start over.`,
       );
-      return;
     }
-
-    if (!approved) {
-      console.log(`[phase] ${ctx.agentSessionId} reply parsed as feedback — revising the plan`);
-      // Same phase as the original plan run so boot reconciliation recovers a
-      // revision run exactly like a plan run (re-attaches, calls #finishPlan).
-      this.#store.setPhase(ctx.agentSessionId, "plan");
-      await acts.thought("Revising the plan per your feedback…");
-
-      const map = this.#store.getRepoMap(this.#config.targetRepo);
-      const result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
-        this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
-        await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), row.branch);
-        const history = await this.#timed(ctx.agentSessionId, "history", () =>
-          prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
-        );
-        const images = await this.#extractImages(ctx, history);
-        return this.#trackedRun(ctx.agentSessionId, "revise", sbx, reviseTask(ctx, plan, replyText, map, history, images), acts);
-      });
-
-      await this.#finishPlan(ctx.agentSessionId, acts, result);
-      return;
-    }
-
-    const decomposition = parseDecomposition(plan);
-    if (decomposition) {
-      await this.#createSubIssues(ctx, acts, decomposition);
-      return;
-    }
-    await acts.thought("Approved — implementing in a sandbox now.");
-    await this.#runImplement(ctx, acts, plan, row.branch, this.#workBranchFor(ctx.issueId, ctx.agentSessionId));
-    return;
   }
 
   // Make the work branch visible on the remote immediately — before the agent
@@ -993,10 +948,14 @@ export class Orchestrator {
           return;
         }
         const acts = this.#makeActs(id);
+        // Synthetic context for the two finish paths that need one (#finishConverse
+        // dispatches through #dispatchConverse, #finishImplement reads issueId) —
+        // reconcile only persists issueId, not the rest of the webhook payload.
+        const ctx: IssueContext = { agentSessionId: id, organizationId: "", issueId: row.issueId, teamId: null, title: "", description: "", comment: "", promptContext: "" };
         // review is advisory: recover to done (retryable by replying), not error
         const fail = (message: string) =>
           row.phase === "review" ? this.#finishReview(id, acts, null)
-          : row.phase === "clarify" ? this.#finishChat(id, acts, null)
+          : row.phase === "clarify" ? this.#finishConverse(ctx, acts, null)
           : this.#failLoud(id, acts, message);
         // implement-phase failures get resume guidance instead of "start over" —
         // Task 4's findResumableByIssue picks this up on the next `created` webhook.
@@ -1047,13 +1006,9 @@ export class Orchestrator {
             } else if (row.phase === "review") {
               await this.#finishReview(id, acts, result);
             } else if (row.phase === "clarify") {
-              await this.#finishChat(id, acts, result);
+              await this.#finishConverse(ctx, acts, result);
             } else {
-              await this.#finishImplement(
-                { agentSessionId: id, organizationId: "", issueId: row.issueId, teamId: null, title: "", description: "", comment: "", promptContext: "" },
-                acts,
-                result,
-              );
+              await this.#finishImplement(ctx, acts, result);
             }
           } finally {
             await sbx.kill().catch(() => undefined);
@@ -1078,7 +1033,4 @@ export class Orchestrator {
 }
 
 // re-export from context to avoid a circular import in tests
-import {
-  parseApproval as parseApprovalGate,
-  parseStop as parseStopGate,
-} from "../linear/context.ts";
+import { parseStop as parseStopGate } from "../linear/context.ts";
