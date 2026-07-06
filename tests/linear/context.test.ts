@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { extractContext, promptedBody, parseApproval, parseStop, isValidBranchName } from "../../src/linear/context.ts";
+import {
+  extractContext,
+  promptedBody,
+  parseApproval,
+  parseStop,
+  parseChangeRequest,
+  isValidBranchName,
+} from "../../src/linear/context.ts";
 
 describe("extractContext", () => {
   it("pulls issue + comment + promptContext", () => {
@@ -95,6 +102,25 @@ describe("parseStop", () => {
   );
 });
 
+
+describe("parseChangeRequest", () => {
+  it("treats clear change requests as true", () => {
+    expect(parseChangeRequest("please fix the error handling")).toBe(true);
+    expect(parseChangeRequest("this is wrong, redo the validation")).toBe(true);
+    expect(parseChangeRequest("address the PR comments")).toBe(true);
+    expect(parseChangeRequest("the tests don't work")).toBe(true);
+    expect(parseChangeRequest("rejected — make these changes")).toBe(true);
+  });
+  it("treats reviews and questions as false", () => {
+    expect(parseChangeRequest("can you review it?")).toBe(false);
+    expect(parseChangeRequest("what does this change do?")).toBe(false);
+    expect(parseChangeRequest("looks good, thanks!")).toBe(false);
+  });
+  it("never fires on a stop", () => {
+    expect(parseChangeRequest("stop")).toBe(false);
+    expect(parseChangeRequest("never mind")).toBe(false);
+  });
+});
 
 describe("isValidBranchName", () => {
   it.each(["main", "feature/foo", "release-1.2.0", "hotfix_123"])(
