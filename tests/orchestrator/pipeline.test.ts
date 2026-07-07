@@ -343,7 +343,7 @@ function makeOrchWithFakeSandbox(
     fetchParent?: (issueId: string) => Promise<{ id: string; title: string; description: string } | null>;
     docsTokens?: RunTokenRegistry;
     fetchImpl?: typeof fetch;
-    writes?: { path: string; data: string }[];
+    writes?: { path: string; data: string | ArrayBuffer }[];
   },
 ): Orchestrator {
   const resultJson = opts.result ? JSON.stringify(opts.result) : "{}";
@@ -351,7 +351,7 @@ function makeOrchWithFakeSandbox(
     sandboxId: "fake-sbx",
     files: {
       read: async () => resultJson,
-      write: async (path: string, data: string) => {
+      write: async (path: string, data: string | ArrayBuffer) => {
         opts.writes?.push({ path, data });
       },
     },
@@ -536,15 +536,30 @@ describe("attachment routing into the sandbox", () => {
   it("writes a non-image/pdf attachment into ATTACHMENTS_DIR and notes it in the goal", async () => {
     const store = new SessionStore(":memory:");
     const log: string[] = [];
-    const writes: { path: string; data: string }[] = [];
+    const writes: { path: string; data: string | ArrayBuffer }[] = [];
     const ctx: IssueContext = {
       agentSessionId: "s_att", organizationId: "org", issueId: "iss_att", teamId: "team_1",
       title: "Read the spec",
       description: "See the attached doc https://uploads.linear.app/abc/spec.docx for details.",
       comment: "", promptContext: "",
     };
+    // Bytes with a value >= 0x80 (0xFF, 0x80) — the regression this test guards
+    // against: the old `.toString("binary")` (latin1) code turned each raw byte
+    // into a JS string code unit, and e2b's files.write(string) UTF-8-encodes
+    // string data via `new Blob([data])` (WHATWG Blob spec), so any byte >= 0x80
+    // came out as a 2-byte UTF-8 sequence on disk — corrupting binary/non-ASCII
+    // files. Passing the raw Buffer/Uint8Array instead (this fix) bypasses that
+    // string re-encoding entirely.
+    const originalBytes = new Uint8Array([0x00, 0xff, 0x80, 0x41]);
+    const fetchImpl = (async (url: string | URL) => {
+      if (String(url).includes("uploads.linear.app")) {
+        return new Response(originalBytes, { status: 200, headers: { "content-type": "application/octet-stream" } });
+      }
+      return new Response(JSON.stringify({ data: { issue: null } }), { status: 200 });
+    }) as unknown as typeof fetch;
     const orch = makeOrchWithFakeSandbox(store, log, {
       writes,
+      fetchImpl,
       runHostTurn: async () => ({
         text: "ACTION: need_repo\nLet me pull up the code…",
         action: "need_repo", body: "Let me pull up the code…", sessionId: null, costUsd: null,
@@ -558,10 +573,18 @@ describe("attachment routing into the sandbox", () => {
 
     const attWrite = writes.find((w) => w.path.startsWith("/home/user/jarvis-attachments/"));
     expect(attWrite?.path).toBe("/home/user/jarvis-attachments/spec.docx");
+    // The captured data must round-trip to the ORIGINAL bytes. On the old
+    // `.toString("binary")` code, this is a string, and running it through the
+    // SDK's actual string path (`new Blob([data]).arrayBuffer()`, UTF-8 encoding)
+    // would NOT reproduce originalBytes — it would come out longer, with 0xFF/0x80
+    // each expanded into a 2-byte UTF-8 sequence. The fix hands over a raw
+    // ArrayBuffer, which round-trips exactly.
+    expect(attWrite?.data).not.toBeTypeOf("string");
+    expect(Buffer.from(attWrite!.data as ArrayBuffer).equals(Buffer.from(originalBytes))).toBe(true);
 
     const taskWrite = writes.find((w) => w.path === "/tmp/jarvis-task.json");
     expect(taskWrite).toBeTruthy();
-    const task = JSON.parse(taskWrite!.data);
+    const task = JSON.parse(taskWrite!.data as string);
     expect(task.goal).toContain("jarvis-attachments");
     expect(task.goal).toContain("spec.docx");
     store.close();

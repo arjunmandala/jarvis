@@ -148,7 +148,7 @@ export async function injectMessage(sbx: AgentSandbox, text: string): Promise<vo
 export interface AgentSandbox {
   // write's return is widened to unknown so the real e2b Sandbox (Promise<WriteInfo>)
   // structurally satisfies this interface.
-  files: { read(path: string): Promise<string>; write(path: string, data: string): Promise<unknown> };
+  files: { read(path: string): Promise<string>; write(path: string, data: string | ArrayBuffer): Promise<unknown> };
   commands: {
     run(cmd: string, opts: object): Promise<{ exitCode: number }>;
     list(): Promise<{ cmd: string; args: string[] }[]>;

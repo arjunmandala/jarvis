@@ -257,7 +257,14 @@ export class Orchestrator {
           documents.push({ mediaType: a.mediaType, data: a.data, filename: a.filename });
         } else if (sbx) {
           try {
-            await sbx.files.write(`${ATTACHMENTS_DIR}/${a.filename}`, Buffer.from(a.data, "base64").toString("binary"));
+            // Raw bytes, not a re-stringified copy: e2b's files.write(string) UTF-8-encodes
+            // string data via `new Blob([data])` (WHATWG Blob spec), so any byte >= 0x80 in a
+            // latin1-decoded string would come out corrupted. bytes.buffer may be a larger,
+            // pooled ArrayBuffer (Buffer.from(string) can slice from Node's internal pool), so
+            // slice out exactly this Buffer's span before handing it to files.write.
+            const bytes = Buffer.from(a.data, "base64");
+            const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+            await sbx.files.write(`${ATTACHMENTS_DIR}/${a.filename}`, arrayBuffer);
             written.push(a.filename);
           } catch (err) {
             console.error(`[attachments] write ${a.filename} failed (advisory): ${err instanceof Error ? err.message : String(err)}`);
