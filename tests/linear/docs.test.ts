@@ -87,18 +87,40 @@ describe("renderDocContext", () => {
   it("returns undefined when there is nothing to inject", () => {
     expect(renderDocContext({ fullDocs: [], projectContent: null, projectDocIndex: [] })).toBeUndefined();
   });
-  it("cuts a later doc too once the cap is exhausted (monotonic)", () => {
-    const big = "y".repeat(DOC_CONTEXT_CAP + 500);
+  it("cuts a later doc once the cap is partially exhausted (monotonic)", () => {
+    // Header length for the exact format renderDocContext emits.
+    const headerLen = (title: string, id: string) => `### ${title} (id: ${id})\n`.length;
+    const HEADROOM = 40; // chars of budget left after doc 1
+
+    // Doc 1: short title, "fits" branch, sized so `used` lands at cap - HEADROOM
+    // (a PARTIAL value — not 0, not cap — which is where the bug manifests).
+    const t1 = "A", id1 = "d1";
+    const content1 = "a".repeat(DOC_CONTEXT_CAP - HEADROOM - headerLen(t1, id1));
+
+    // Doc 2: LONG title whose header alone exceeds HEADROOM → hits the
+    // `remaining <= 0` (marker-only) branch. On the OLD code this branch left
+    // `used` at doc-1's partial value; the fix sets `used = cap` here.
+    const t2 = "L".repeat(60), id2 = "d2"; // header ≈ 74 > HEADROOM
+    expect(headerLen(t2, id2)).toBeGreaterThan(HEADROOM);
+
+    // Doc 3: short title + small unique body. On OLD code `used` is still partial
+    // so `remaining` is positive and doc 3 fits → FULL body shown. With the fix
+    // `used == cap` → doc 3 is marker-only.
+    const t3 = "C", id3 = "d3";
+    const body3 = "DOC3BODY_UNIQUE";
+    expect(body3.length).toBeLessThan(HEADROOM - headerLen(t3, id3)); // fits on OLD code
+
     const out = renderDocContext({
       fullDocs: [
-        { id: "dFirst", title: "First", content: big },
-        { id: "dSecond", title: "S", content: "second body should not appear in full" },
+        { id: id1, title: t1, content: content1 },
+        { id: id2, title: t2, content: "irrelevant" },
+        { id: id3, title: t3, content: body3 },
       ],
       projectContent: null,
       projectDocIndex: [],
     })!;
-    expect(out).toContain('get_document("dSecond")');
-    expect(out).not.toContain("second body should not appear in full");
+    expect(out).not.toContain(body3);              // full body cut only WITH the fix
+    expect(out).toContain(`get_document("${id3}")`); // doc 3 is marker-only
   });
 });
 
