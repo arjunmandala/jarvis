@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 Jarvis is a coding agent for the company: a Linear issue gets assigned to Jarvis;
-it clarifies, posts a plan, and on approval writes code, tests it in an E2B sandbox,
-and opens a GitHub PR for a human to approve. Full design/rationale: [`BUILD_PLAN.md`](./BUILD_PLAN.md).
+it clarifies, posts a plan, and once you agree writes code, tests it in an E2B sandbox,
+and opens a GitHub PR for a human to merge. Full design/rationale: [`BUILD_PLAN.md`](./BUILD_PLAN.md).
 
 Jarvis does not reimplement a planner, debugger, or
 review engine. It wires together the Claude Agent SDK (the autonomous loop), the
@@ -164,8 +164,8 @@ not-live prior session for the same issue and, if found, skips straight past
 planning instead of starting over: prior with a `prUrl` (done, or the transient
 `review` phase) → point the new session at the existing PR; prior `implement`/
 `error` → `implement` again, resuming from the saved plan and the prior's pushed
-work branch (no re-plan, no re-approval); prior `await_approval`/`plan` → reuse
-the saved plan and re-post it for approval. A prior that's still live refuses the
+work branch (no re-plan, no re-approval); prior `await_approval` (legacy)/`plan` → reuse
+the saved plan and re-post it for agreement. A prior that's still live refuses the
 new run outright rather than racing it. Every resumed-from prior is retired
 (phase forced to `done`, `sandboxId` cleared) so `reconcile()` doesn't also try
 to re-attach to its now-stale sandbox.
@@ -249,11 +249,10 @@ goal text, model, and turn cap, not the tool list:
 | `implementTask()` | sonnet-5 **or** opus-4-8 (routed) | 120 | agreed plan → code, tests, push, `gh pr create`; final message must be exactly the PR URL, or `PR_FAILED: <reason>`. Takes an optional `workBranch`: when set (a resumed run), it pins that branch (`git checkout -B <workBranch> origin/<workBranch> \|\| git checkout -b <workBranch>`) instead of branching fresh, and pushes after each meaningful step rather than once at the end, so a mid-run death leaves recoverable work on the remote |
 | `reviewTask()` | sonnet-5 | 40 | self-review of big diffs + on-demand PR review; final message = the report |
 
-Every task can carry `images`: screenshots and files pasted into Linear arrive as
-markdown links to `uploads.linear.app`, downloaded host-side by `fetchAttachments`
-(`src/linear/attachments.ts`, capped at 5 attachments / 5 MB each, advisory — a failed
-download is skipped, never thrown), routed by content type (`routeAttachment`), and
-passed to the agent as image content blocks or task file input as appropriate.
+Every task can also carry per-run context beyond the goal text — `images`/`documents`
+(file attachments), `docsContext` (pre-rendered Linear docs), and a `docsMcp` config
+(the on-demand docs endpoint) — all assembled host-side and detailed under **Linear
+docs & file attachments as agent context** below.
 
 Each task also carries an `effort` hint (`map`=low, `plan`/`revise`/`review`=medium,
 `implement`=high) — the Agent SDK default is `high`; lowering it on bounded tasks cuts
@@ -269,6 +268,36 @@ when a task's `allowedTools` include it.
 content into them) so the Agent SDK's prompt cache hits across runs — per-run content
 (issue body, repo map, plan) goes in `goal` instead. The plan's first two lines are the
 fixed contract `Type: <…>` / `Scope: <small|large>`; `implementTask` parses them to route.
+
+### Linear docs & file attachments as agent context (`src/linear/docs.ts`, `src/mcp/docs-server.ts`, `src/linear/attachments.ts`)
+
+Beyond the issue body and repo map, three per-run context channels feed the agent.
+All advisory: any failure logs and the run proceeds without them.
+
+- **File attachments** (`attachments.ts`) — files pasted into Linear are markdown
+  links to `uploads.linear.app`, downloaded host-side by `fetchAttachments` (capped
+  at 5 files / 5 MB each; a failed/oversized download is skipped, never thrown) and
+  routed by content type (`routeAttachment`): images → `image` content blocks, PDFs →
+  `document` content blocks (both read natively by the model), everything else →
+  written raw into the sandbox at `ATTACHMENTS_DIR` for the agent to convert with
+  `pandoc`/`poppler-utils` (both baked into the template by `e2b/build-template.ts`).
+  Bytes are written as a sliced `ArrayBuffer`, not a latin1 string, so binary/non-ASCII
+  files survive intact. With no sandbox (Tier 0), a non-inline file's name is folded
+  into a note so the agent can escalate `ACTION: need_repo` to read it.
+- **Up-front doc context** (`docs.ts` `assembleDocContext`) — Linear documents on the
+  issue's project, plus any doc links pasted into the ticket (`extractPastedDocSlugs`),
+  are fetched and pre-rendered into `docsContext`, injected into every task/tier goal
+  via `docsBlock`. Capped (`renderDocContext`) with recoverable
+  `[truncated at N — call get_document(...)]` markers so the agent can pull the rest.
+- **On-demand docs MCP** (`docs-server.ts`) — a JSON-RPC endpoint mounted at
+  `POST /mcp/docs` (`server.ts`) exposing four issue-scoped tools: `search_documents`,
+  `get_document`, `get_thread` (this issue's Linear conversation), and `get_run_events`
+  (this issue's prior raw run streams). Registered in the sandbox runner from
+  `task.docsMcp` and in the Tier 0 host turn. The Linear OAuth token **never enters the
+  sandbox**: each run mints a short-lived bearer token (in-memory registry) carrying
+  issue-scoped claims, the sandbox calls back to the host with it, and the host does the
+  GraphQL/DB reads. `get_thread`/`get_run_events` are the realized retrieval seam the
+  session-memory upgrade path points at (see Session memory above).
 
 ### Linear integration (`src/linear/`)
 
@@ -288,8 +317,11 @@ fixed contract `Type: <…>` / `Scope: <small|large>`; `implementTask` parses th
   the known ceiling (sarcasm/edge phrasing) and upgrade path.
 - `token-manager.ts` — `LinearTokenManager`, the automatic app-actor token renewal
   described under Runtime prerequisites above.
-- `attachments.ts` — extracts + downloads Linear image uploads for task `images`
-  (see Agent tasks above).
+- `attachments.ts` — extracts + downloads Linear file uploads (images, PDFs, and
+  other files), routed by content type (see **Linear docs & file attachments** above).
+- `docs.ts` — Linear documents GraphQL layer (`searchDocuments`, `getDocumentContent`)
+  plus `assembleDocContext` (up-front doc context) and `sliceWithMarker` (recoverable
+  truncation markers). The on-demand side lives in `src/mcp/docs-server.ts`.
 - `workflow.ts` — moves the Linear issue's workflow status at four moments
   (`plan_start`, `implement_start`, `pr_opened`, `done`), matching by Linear's
   standardized state *category* (stable across teams) with a Haiku tiebreak
@@ -307,7 +339,7 @@ Seven tables, no ORM: `sessions` (one row per Linear agent session — phase, pl
 sandboxId), `repo_maps` (one row per target repo, cached architecture map),
 `runs` (one row per agent invocation — cost/tokens/outcome), `run_events` (raw
 `JarvisEvent` stream per run, for `npm run report`'s failure-pattern mining),
-`session_events` (phase transitions + host timings per session — approval dwell,
+`session_events` (phase transitions + host timings per session — plan-agreement dwell,
 created→PR, and sandbox_create/clone/serena_index/history durations for the report),
 `team_states` (cached Linear workflow states per team), `oauth_tokens` (the
 auto-renewed Linear app-actor token).
@@ -338,6 +370,6 @@ doc — there is no structural `await_approval` gate.)
 - Tests fake the E2B `Sandbox`/`AgentSandbox` via the structural `AgentSandbox`
   interface in `sandbox/session.ts` — no real e2b/network calls in the suite.
 - `// ponytail:` comments mark deliberate simplifications with a named ceiling and
-  upgrade path (e.g. keyword-based approval parsing, retry-everything with no
+  upgrade path (e.g. keyword-based stop parsing, retry-everything with no
   transient/permanent error split, no sandbox pooling) — read them before "fixing"
   what looks like missing robustness.

@@ -6,7 +6,7 @@
 <meta name="description" content="Jarvis: a coding agent that lives in Linear. An issue goes in, a pull request comes out: planned, built, and tested in a disposable sandbox, with a human merging the result.">
 <meta name="theme-color" content="#000000">
 <meta property="og:title" content="JARVIS — Agent Specification">
-<meta property="og:description" content="An issue goes in. A pull request comes out. Nothing ships without a human saying yes. Twice.">
+<meta property="og:description" content="An issue goes in. A pull request comes out. A human merges it — Jarvis never does.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23000'/%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%23fff' stroke-width='1.5' stroke-dasharray='10 5'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23fff'/%3E%3C/svg%3E">
 <title>JARVIS — Agent Specification</title>
 <style>
@@ -343,7 +343,7 @@
     <div class="hero-copy">
       <span class="eyebrow">A coding agent that lives in Linear</span>
       <h1>An issue goes in.<br><span class="typed-caret">A pull request comes out.</span></h1>
-      <p class="sub">Everything in between (the plan, the code, the tests) happens in a disposable sandbox, and <em>nothing ships without a human saying yes. Twice.</em></p>
+      <p class="sub">Everything in between (the plan, the code, the tests) happens in a disposable sandbox, and <em>nothing ships until a human merges the pull request.</em></p>
     </div>
     <div class="reactor" aria-hidden="true">
       <svg viewBox="0 0 200 200">
@@ -407,7 +407,7 @@
         </circle>
       </svg>
     </div>
-    <div class="signal-caption">FIG. 1 — THE ONLY PATH TO PRODUCTION. THE PULSE WAITS AT EVERY DIAMOND.</div>
+    <div class="signal-caption">FIG. 1 — THE ONLY PATH TO PRODUCTION. THE DIAMOND IS THE MERGE; ONLY A HUMAN CROSSES IT.</div>
   </div>
 
   <!-- ============ WHAT IT IS ============ -->
@@ -434,7 +434,7 @@
       </div>
       <div class="hud rv rv-d3"><span class="corner"></span>
         <span class="part">Linear</span>
-        <p>The surface: issues, comments, and approvals are the entire user interface.</p>
+        <p>The surface: issues, comments, and reviews are the entire user interface.</p>
       </div>
     </div>
   </section>
@@ -453,7 +453,7 @@
       <div class="tenet hud rv"><span class="corner"></span>
         <svg viewBox="0 0 24 24"><path d="M4 18c3-8 6-8 8-4s5 4 8-4"/><path d="M4 6h16" stroke-dasharray="2 3"/></svg>
         <h3>Advisory everything</h3>
-        <p>Memory, screenshots, symbol indexing, status nudges: every enhancement fails soft. A broken bonus never blocks a run.</p>
+        <p>Memory, attachments, docs, symbol indexing, status nudges: every enhancement fails soft. A broken bonus never blocks a run.</p>
       </div>
       <div class="tenet hud rv rv-d1"><span class="corner"></span>
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 3"/></svg>
@@ -609,8 +609,12 @@
         <dd>The SDK reports usage for the final turn only; the runner sums every turn into a cumulative total, so the cost ledger reflects what a run actually spent.</dd>
       </div>
       <div class="spec-item rv">
-        <dt>screenshots ride along</dt>
-        <dd>Images pasted into Linear are downloaded host-side (capped at five images, 5&nbsp;MB each) and handed to the agent as real image content. A failed download is skipped, never fatal.</dd>
+        <dt>attachments ride along</dt>
+        <dd>Anything pasted into Linear is pulled in host-side (capped at five files, 5&nbsp;MB each): images and PDFs become native content the model reads directly; any other file is dropped into the sandbox for the agent to convert with pandoc or poppler. A failed download is skipped, never fatal.</dd>
+      </div>
+      <div class="spec-item rv">
+        <dt>docs are context too</dt>
+        <dd>Linear documents on the issue's project, plus any doc links pasted into the ticket, are pulled in as context: the relevant ones are rendered straight into the task up front, and a small host-side endpoint lets the agent search the workspace, open any document, or re-read the full comment thread and a prior run's raw logs on demand. The Linear token never enters the sandbox; the agent calls back with a per-run key scoped to just this issue.</dd>
       </div>
       <div class="spec-item rv">
         <dt>status follows phase</dt>
@@ -626,7 +630,7 @@
       </div>
       <div class="spec-item rv">
         <dt>plan recovery from Linear itself</dt>
-        <dd>If the local database ever loses a plan, a GraphQL fallback recovers the last one straight from Linear's activity history, identified by the approval footer every plan carries.</dd>
+        <dd>If the local database ever loses a plan, a GraphQL fallback recovers the last one straight from Linear's activity history, identified by the footer every posted plan carries.</dd>
       </div>
     </dl>
   </section>

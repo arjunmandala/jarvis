@@ -2,7 +2,7 @@
 
 A coding agent for the company: a Linear issue gets assigned to Jarvis; Jarvis
 talks it through, posts a plan, and once you agree writes code, tests it in a
-sandbox, and opens a PR for a human to approve.
+sandbox, and opens a PR for a human to review and merge.
 
 See [`BUILD_PLAN.md`](./BUILD_PLAN.md) for the full design and task breakdown, and
 [`CLAUDE.md`](./CLAUDE.md) for a deeper architecture map (protocol details, phase
@@ -27,7 +27,7 @@ Linear issue assigned  ──►  webhook  ──►  Orchestrator  ──►  E
 ```
 src/
 ├── index.ts              # entrypoint: load config, start the Hono server
-├── server.ts             # Linear webhook receiver + routing + /oauth/callback
+├── server.ts             # Linear webhook receiver + routing + /oauth/callback + /mcp/docs
 ├── config.ts             # env var loading/validation
 ├── logger.ts             # console.log/error tag-coloring patch
 ├── report.ts             # `npm run report` entrypoint
@@ -47,13 +47,16 @@ src/
 │   └── session.ts        # E2B lifecycle, host↔sandbox file/stream protocol
 ├── history/
 │   └── history.ts        # same-issue memory: thread text + prior run streams into the sandbox
+├── mcp/
+│   └── docs-server.ts    # issue-scoped docs MCP (search_documents/get_document/get_thread/get_run_events) over POST /mcp/docs
 ├── linear/
-│   ├── client.ts         # LinearClient + plan/thread-recovery GraphQL queries
+│   ├── client.ts         # LinearClient + plan/thread/parent-recovery GraphQL queries
 │   ├── activities.ts     # thought/action/response/error/elicitation posts
 │   ├── context.ts        # webhook payload parsing, stop parsing
 │   ├── token-manager.ts  # auto-renewing Linear app-actor OAuth token
 │   ├── workflow.ts       # moves the Linear issue's status as phases advance
-│   └── attachments.ts    # downloads Linear image uploads for agent tasks
+│   ├── attachments.ts    # downloads Linear file uploads (images/PDFs/files), routed by content type
+│   └── docs.ts           # Linear docs GraphQL + up-front doc-context assembly
 └── store/
     └── sessions.ts       # SQLite: sessions, repo_maps, runs, run_events, session_events, team_states, oauth_tokens
 

@@ -6,3 +6,4 @@ dist/
 .superpowers/
 .tools/
 jarvis-report.html
+push-to-github.ps1
