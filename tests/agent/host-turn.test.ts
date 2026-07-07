@@ -40,3 +40,28 @@ test("passes a web-only allowlist and a deny-all-else canUseTool", async () => {
   const ok = await captured.options.canUseTool("WebSearch", { query: "x" });
   expect(ok.behavior).toBe("allow");
 });
+
+test("registers the docs MCP server and allows its tools when docsMcp is set", async () => {
+  let captured: any = null;
+  const queryFn = (args: any) => {
+    captured = args;
+    return (async function* () {
+      yield { type: "result", subtype: "success", result: "ACTION: reply\nhi", total_cost_usd: 0, session_id: "sess" };
+    })();
+  };
+  await runHostTurn({
+    apiKey: "k", ctx, userMessage: "q",
+    docsMcp: { url: "http://h/mcp/docs", token: "tok" },
+    docsContext: "DOC CONTEXT",
+    queryFn: queryFn as any,
+  });
+  expect(captured.options.mcpServers.docs).toMatchObject({ type: "http", url: "http://h/mcp/docs", headers: { Authorization: "Bearer tok" } });
+  expect(captured.options.allowedTools.some((t: string) => t.startsWith("mcp__docs"))).toBe(true);
+  // canUseTool allows a docs tool call
+  const decision = await captured.options.canUseTool("mcp__docs__get_document");
+  expect(decision.behavior).toBe("allow");
+  // and still denies Bash
+  const denied = await captured.options.canUseTool("Bash");
+  expect(denied.behavior).toBe("deny");
+  expect(String(captured.prompt).includes("DOC CONTEXT")).toBe(true);
+});

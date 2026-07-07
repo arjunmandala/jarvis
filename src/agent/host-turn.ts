@@ -1,14 +1,17 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { IssueContext } from "../linear/context.ts";
-import { issueBlock, historyBlock } from "./tasks.ts";
+import { issueBlock, historyBlock, type DocsMcpConfig } from "./tasks.ts";
 import { CONVERSE_APPEND, parseConverseAction, type ConverseAction } from "./converse.ts";
 
-// The only tools a host turn may use: web lookups. NEVER add Bash/Edit/Write —
-// this SDK call runs on the host, not in the sandbox, so a repo/exec tool would
+// The only tools a host turn may use: web lookups and the remote docs MCP
+// server (read-only, HTTP, not the sandbox). NEVER add Bash/Edit/Write — this
+// SDK call runs on the host, not in the sandbox, so a repo/exec tool would
 // execute against the host filesystem. Enforced by BOTH the allowlist and the
 // canUseTool deny gate below (defense in depth).
-const HOST_TOOLS = ["WebSearch", "WebFetch"];
-const HOST_TOOLS_SET = new Set(HOST_TOOLS);
+const HOST_WEB_TOOLS = ["WebSearch", "WebFetch"];
+function hostToolAllowed(name: string): boolean {
+  return name === "WebSearch" || name === "WebFetch" || name.startsWith("mcp__docs");
+}
 
 export interface HostTurnResult {
   text: string;
@@ -36,13 +39,17 @@ export async function runHostTurn(opts: {
   ctx: IssueContext;
   userMessage: string;
   history?: string;
+  docsContext?: string;
+  docsMcp?: DocsMcpConfig;
   queryFn?: QueryFn;
 }): Promise<HostTurnResult> {
   const run = opts.queryFn ?? (query as unknown as QueryFn);
+  const docsTools = opts.docsMcp ? ["mcp__docs"] : [];
   const prompt =
     `The human's latest message:\n${opts.userMessage}\n\n` +
     `Respond per the PROTOCOL. You do NOT have repo access in this turn — if you must read the code to ` +
-    `answer or plan, emit ACTION: need_repo.\n\n---\n${issueBlock(opts.ctx)}${historyBlock(opts.history)}`;
+    `answer or plan, emit ACTION: need_repo.\n\n---\n${issueBlock(opts.ctx)}${historyBlock(opts.history)}` +
+    (opts.docsContext ? `\n\n---\nLinear documents:\n${opts.docsContext}` : "");
 
   process.env.ANTHROPIC_API_KEY = opts.apiKey; // SDK reads it from env, same as the sandbox runner
 
@@ -55,13 +62,16 @@ export async function runHostTurn(opts: {
     options: {
       model: "claude-sonnet-5",
       systemPrompt: { type: "preset", preset: "claude_code", append: CONVERSE_APPEND, excludeDynamicSections: true },
-      allowedTools: HOST_TOOLS,
+      allowedTools: [...HOST_WEB_TOOLS, ...docsTools],
       permissionMode: "default",
       canUseTool: async (name: string) =>
-        HOST_TOOLS_SET.has(name) ? { behavior: "allow" as const } : { behavior: "deny" as const },
+        hostToolAllowed(name) ? { behavior: "allow" as const } : { behavior: "deny" as const },
       maxTurns: 8,
       maxBudgetUsd: 0.5,
       effort: "medium",
+      ...(opts.docsMcp
+        ? { mcpServers: { docs: { type: "http", url: opts.docsMcp.url, headers: { Authorization: `Bearer ${opts.docsMcp.token}` } } } }
+        : {}),
     },
   })) {
     if (message.type === "assistant") {
