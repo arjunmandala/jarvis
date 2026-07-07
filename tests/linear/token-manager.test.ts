@@ -60,6 +60,7 @@ describe("LinearTokenManager — refreshNow", () => {
     const body = String(init.body);
     expect(body).toContain("grant_type=client_credentials");
     expect(body).toContain("client_id=cid");
+    expect(body).toContain("scope=read"); // required by Linear or 400 invalid_scope
     expect(body).not.toContain("boot"); // never sends the stale token
   });
 

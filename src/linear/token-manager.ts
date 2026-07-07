@@ -107,6 +107,12 @@ export class LinearTokenManager {
         client_id: this.#clientId,
         client_secret: this.#clientSecret,
         grant_type: "client_credentials",
+        // Linear requires `scope` on client_credentials (absent → invalid_scope).
+        // read,write covers posting agent activities + reading issues; the
+        // app:assignable/app:mentionable capabilities are granted at install via
+        // the authorize flow, not requestable as token scopes here.
+        // ponytail: hardcoded; make it an env knob only if the app's scopes change.
+        scope: "read,write",
       }),
     });
     if (!res.ok) {
