@@ -20,7 +20,11 @@ export const MAX_FILE_BYTES = 1_000_000;
 export type ThreadFetcher = (agentSessionId: string) => Promise<string | null>;
 
 /** Concatenate each session's visible thread, oldest-first; cap keeping the newest tail. */
-export async function assembleThread(sessionIds: string[], fetchThread: ThreadFetcher): Promise<string | null> {
+export async function assembleThread(
+  sessionIds: string[],
+  fetchThread: ThreadFetcher,
+  cap: number = THREAD_CHAR_CAP,
+): Promise<string | null> {
   const parts: string[] = [];
   for (const id of sessionIds) {
     try {
@@ -32,8 +36,9 @@ export async function assembleThread(sessionIds: string[], fetchThread: ThreadFe
   }
   if (parts.length === 0) return null;
   let out = parts.join("\n\n---\n\n");
-  if (out.length > THREAD_CHAR_CAP) {
-    out = `…(older conversation truncated)\n${out.slice(-THREAD_CHAR_CAP)}`;
+  if (out.length > cap) {
+    const dropped = out.length - cap;
+    out = `[older conversation truncated — call get_thread(offset=${dropped}) for the earlier messages]\n${out.slice(-cap)}`;
   }
   return out;
 }
@@ -44,7 +49,13 @@ export async function writeHistoryFiles(sbx: AgentSandbox, logs: RunLog[]): Prom
   const written: string[] = [];
   for (const log of recent) {
     const name = `run-${log.runId}-${log.taskType}.jsonl`;
-    const data = log.jsonl.length > MAX_FILE_BYTES ? log.jsonl.slice(-MAX_FILE_BYTES) : log.jsonl;
+    let data = log.jsonl;
+    if (data.length > MAX_FILE_BYTES) {
+      const dropped = data.length - MAX_FILE_BYTES;
+      data =
+        `[truncated: first ${dropped} bytes dropped — call get_run_events(runId=${log.runId}, offset=0) for the full stream]\n` +
+        data.slice(-MAX_FILE_BYTES);
+    }
     try {
       await sbx.files.write(`${HISTORY_DIR}/${name}`, data);
       written.push(name);
@@ -56,17 +67,20 @@ export async function writeHistoryFiles(sbx: AgentSandbox, logs: RunLog[]): Prom
 }
 
 /** The goal-injectable history block: thread text + a grep pointer at the exported logs. */
-export function renderHistory(thread: string | null, files: string[]): string | undefined {
+export function renderHistory(thread: string | null, files: string[], olderRunsExist = false): string | undefined {
   const sections: string[] = [];
   if (thread) {
     sections.push(`Conversation from prior sessions on this issue (oldest first):\n\n${thread}`);
   }
   if (files.length > 0) {
+    const older = olderRunsExist
+      ? ` Older runs beyond these are not exported — call get_run_events(runId=…) to fetch any of them.`
+      : "";
     sections.push(
       `Raw event logs from prior runs are in ${HISTORY_DIR}/ (${files.join(", ")}). ` +
         `Each line is one JSON event (tool_use, tool_result, assistant_text, result). ` +
         `Grep them when you need what a past run actually did — files edited, commands run, ` +
-        `test output, failure messages. Do not read them wholesale and never commit them.`,
+        `test output, failure messages. Do not read them wholesale and never commit them.${older}`,
     );
   }
   if (sections.length === 0) return undefined;
@@ -96,7 +110,8 @@ export async function prepareHistory(
     const thread = fetchThread ? await assembleThread(ids, fetchThread) : null;
     const logs = ids.flatMap((id) => store.getRunLogsBySession(id));
     const files = await writeHistoryFiles(sbx, logs);
-    return renderHistory(thread, files);
+    const olderRunsExist = logs.filter((l) => l.jsonl).length > MAX_EXPORTED_RUNS;
+    return renderHistory(thread, files, olderRunsExist);
   } catch (err) {
     console.error(`[history] prepareHistory failed (advisory): ${err instanceof Error ? err.message : String(err)}`);
     return undefined;

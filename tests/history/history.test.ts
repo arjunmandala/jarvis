@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  HISTORY_DIR, THREAD_CHAR_CAP, MAX_EXPORTED_RUNS,
+  HISTORY_DIR, THREAD_CHAR_CAP, MAX_EXPORTED_RUNS, MAX_FILE_BYTES,
   assembleThread, writeHistoryFiles, renderHistory, prepareHistory,
 } from "../../src/history/history.ts";
 import { SessionStore, type RunLog } from "../../src/store/sessions.ts";
@@ -38,12 +38,18 @@ describe("assembleThread", () => {
     expect(await assembleThread(["s1"], async () => null)).toBeNull();
   });
 
-  it("caps the assembled thread, keeping the newest tail", async () => {
+  it("caps the assembled thread, keeping the newest tail with a recoverable marker", async () => {
     const big = "x".repeat(THREAD_CHAR_CAP);
     const out = await assembleThread(["s1", "s2"], async (id) => (id === "s1" ? big : "TAIL_MARKER"));
     expect(out!.length).toBeLessThanOrEqual(THREAD_CHAR_CAP + 100);
     expect(out).toContain("TAIL_MARKER");
-    expect(out!.startsWith("…(older conversation truncated)")).toBe(true);
+    expect(out!.startsWith("[older conversation truncated — call get_thread(offset=")).toBe(true);
+  });
+
+  it("does not truncate when cap is Infinity (full thread for get_thread)", async () => {
+    const big = "y".repeat(THREAD_CHAR_CAP * 2);
+    const out = await assembleThread(["s1"], async () => big, Infinity);
+    expect(out).toBe(big);
   });
 });
 
@@ -72,6 +78,16 @@ describe("writeHistoryFiles", () => {
     expect(files).not.toContain(failing); // write threw → skipped, not fatal
     expect(files).toContain(`run-${MAX_EXPORTED_RUNS + 2}-plan.jsonl`);
   });
+
+  it("prepends a recoverable first line when a run log is tail-sliced", async () => {
+    const { sbx, writes } = fakeSbx();
+    const big = "z".repeat(MAX_FILE_BYTES + 10);
+    await writeHistoryFiles(sbx, [runLog(42, "implement", big)]);
+    const written = writes.get(`${HISTORY_DIR}/run-42-implement.jsonl`)!;
+    expect(written.startsWith("[truncated: first ")).toBe(true);
+    expect(written).toContain("get_run_events(runId=42");
+    expect(written).toContain(big.slice(-100)); // newest tail retained
+  });
 });
 
 describe("renderHistory", () => {
@@ -90,6 +106,11 @@ describe("renderHistory", () => {
     expect(renderHistory("**Human:** hi", [])).toContain("**Human:** hi");
     expect(renderHistory("**Human:** hi", [])).not.toContain(HISTORY_DIR);
     expect(renderHistory(null, ["run-1-plan.jsonl"])).toContain(HISTORY_DIR);
+  });
+
+  it("notes older runs are reachable via get_run_events when olderRunsExist", () => {
+    const out = renderHistory(null, ["run-1-plan.jsonl"], true);
+    expect(out).toContain("get_run_events");
   });
 });
 
