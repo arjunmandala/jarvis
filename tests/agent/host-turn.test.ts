@@ -65,3 +65,39 @@ test("registers the docs MCP server and allows its tools when docsMcp is set", a
   expect(denied.behavior).toBe("deny");
   expect(String(captured.prompt).includes("DOC CONTEXT")).toBe(true);
 });
+
+test("builds a content-block user message when images/documents are present", async () => {
+  let captured: any = null;
+  const queryFn = (args: any) => {
+    captured = args;
+    return (async function* () {
+      yield { type: "result", subtype: "success", result: "ACTION: reply\nok", session_id: "s" };
+    })();
+  };
+  await runHostTurn({
+    apiKey: "k", ctx, userMessage: "q",
+    images: [{ mediaType: "image/png", data: "AAAA" }],
+    documents: [{ mediaType: "application/pdf", data: "BBBB", filename: "spec.pdf" }],
+    queryFn: queryFn as any,
+  });
+  // prompt is now an async iterable of a user message with content blocks
+  const first = (await captured.prompt[Symbol.asyncIterator]().next()).value;
+  const kinds = first.message.content.map((b: any) => b.type);
+  expect(kinds).toContain("image");
+  expect(kinds).toContain("document");
+  expect(kinds).toContain("text");
+});
+
+test("keeps the prompt a plain string when no images/documents are present (back-compat)", async () => {
+  let captured: any = null;
+  const queryFn = (args: any) => { captured = args; return fakeQuery("ACTION: reply\nhi")(); };
+  await runHostTurn({ apiKey: "k", ctx, userMessage: "hi", queryFn });
+  expect(typeof captured.prompt).toBe("string");
+});
+
+test("folds an attachment note into the prompt", async () => {
+  let captured: any = null;
+  const queryFn = (args: any) => { captured = args; return fakeQuery("ACTION: reply\nok")(); };
+  await runHostTurn({ apiKey: "k", ctx, userMessage: "q", attachmentNote: "Files attached: spec.pdf", queryFn });
+  expect(String(captured.prompt)).toContain("spec.pdf");
+});

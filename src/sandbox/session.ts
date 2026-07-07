@@ -14,6 +14,12 @@ export interface SandboxConfig {
 
 export const REPO_DIR = "/home/user/repo";
 
+// Non-image/PDF attachments (text and other binary formats) are written here
+// inside the sandbox so the agent can read/convert them directly (pandoc,
+// poppler-utils). Images and PDFs instead go in as native content blocks —
+// see AgentTask.images/documents and Orchestrator#extractAttachments.
+export const ATTACHMENTS_DIR = "/home/user/jarvis-attachments";
+
 // ponytail: retries ALL errors — no transient/permanent split. Upgrade path is an
 // error-classifier predicate if 4xx-style permanent failures cause noise. Matches the
 // Minor already accepted on the Linear-post retry (durable-runs phase) — keep consistent.

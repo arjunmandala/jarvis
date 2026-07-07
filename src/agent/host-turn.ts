@@ -1,6 +1,6 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { IssueContext } from "../linear/context.ts";
-import { issueBlock, historyBlock, type DocsMcpConfig } from "./tasks.ts";
+import { issueBlock, historyBlock, type DocsMcpConfig, type AgentTask } from "./tasks.ts";
 import { CONVERSE_APPEND, parseConverseAction, type ConverseAction } from "./converse.ts";
 
 // The only tools a host turn may use: web lookups and the remote docs MCP
@@ -29,7 +29,7 @@ type SdkMessage = {
   session_id?: string | null;
   message?: { content?: { type: string; text?: string }[] };
 };
-type QueryFn = (args: { prompt: string; options: Record<string, unknown> }) => AsyncIterable<SdkMessage>;
+type QueryFn = (args: { prompt: string | AsyncIterable<unknown>; options: Record<string, unknown> }) => AsyncIterable<SdkMessage>;
 
 // Tier 0: run one conversational turn in-process on the host with no sandbox and
 // a web-only toolset. Returns the parsed ACTION. If the agent needs the repo it
@@ -41,6 +41,13 @@ export async function runHostTurn(opts: {
   history?: string;
   docsContext?: string;
   docsMcp?: DocsMcpConfig;
+  // Images/PDFs from Linear attachments — passed as native content blocks on the
+  // first turn, same shape as AgentTask's fields. Other attachment kinds (text/
+  // binary) have nowhere to be written on the host (no sandbox); their filenames
+  // arrive folded into attachmentNote instead, as a plain prompt pointer.
+  images?: AgentTask["images"];
+  documents?: AgentTask["documents"];
+  attachmentNote?: string;
   queryFn?: QueryFn;
 }): Promise<HostTurnResult> {
   const run = opts.queryFn ?? (query as unknown as QueryFn);
@@ -49,7 +56,30 @@ export async function runHostTurn(opts: {
     `The human's latest message:\n${opts.userMessage}\n\n` +
     `Respond per the PROTOCOL. You do NOT have repo access in this turn — if you must read the code to ` +
     `answer or plan, emit ACTION: need_repo.\n\n---\n${issueBlock(opts.ctx)}${historyBlock(opts.history)}` +
-    (opts.docsContext ? `\n\n---\nLinear documents:\n${opts.docsContext}` : "");
+    (opts.docsContext ? `\n\n---\nLinear documents:\n${opts.docsContext}` : "") +
+    (opts.attachmentNote ? `\n\n---\n${opts.attachmentNote}` : "");
+
+  // Only when there's an image/PDF to carry do we switch the prompt to an async
+  // generator yielding one user message with content blocks — otherwise keep the
+  // plain string (back-compat, and the common case with no attachments).
+  const hasBlocks = (opts.images?.length ?? 0) + (opts.documents?.length ?? 0) > 0;
+  const promptArg: string | AsyncIterable<unknown> = hasBlocks
+    ? (async function* () {
+        yield {
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              ...(opts.images ?? []).map((i) => ({ type: "image", source: { type: "base64", media_type: i.mediaType, data: i.data } })),
+              ...(opts.documents ?? []).map((d) => ({ type: "document", source: { type: "base64", media_type: d.mediaType, data: d.data } })),
+              { type: "text", text: prompt },
+            ],
+          },
+          parent_tool_use_id: null,
+          session_id: "",
+        };
+      })()
+    : prompt;
 
   process.env.ANTHROPIC_API_KEY = opts.apiKey; // SDK reads it from env, same as the sandbox runner
 
@@ -58,7 +88,7 @@ export async function runHostTurn(opts: {
   let costUsd: number | null = null;
 
   for await (const message of run({
-    prompt,
+    prompt: promptArg,
     options: {
       model: "claude-sonnet-5",
       systemPrompt: { type: "preset", preset: "claude_code", append: CONVERSE_APPEND, excludeDynamicSections: true },

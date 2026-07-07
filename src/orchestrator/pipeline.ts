@@ -3,7 +3,7 @@ import type { SessionStore, Phase, SessionRow, RunFinish } from "../store/sessio
 import type { Activities } from "../linear/activities.ts";
 import type { IssueContext } from "../linear/context.ts";
 import { APPROVAL_FOOTER, isValidBranchName } from "../linear/context.ts";
-import { withSandbox, cloneRepo, runAgent, watchDetached, injectMessage, runCommand, redactSecret, REPO_DIR, type AgentSandbox } from "../sandbox/session.ts";
+import { withSandbox, cloneRepo, runAgent, watchDetached, injectMessage, runCommand, redactSecret, REPO_DIR, ATTACHMENTS_DIR, type AgentSandbox } from "../sandbox/session.ts";
 import { Sandbox } from "e2b";
 import { planTask, implementTask, mapTask, reviseTask, reviewTask } from "../agent/tasks.ts";
 import type { AgentTask } from "../agent/tasks.ts";
@@ -12,7 +12,7 @@ import { prepareHistory, type ThreadFetcher } from "../history/history.ts";
 import { classifyPrRevision } from "../agent/classify.ts";
 import { converseTask, parseConverseAction, type ConverseAction } from "../agent/converse.ts";
 import { runHostTurn as defaultRunHostTurn, type HostTurnResult } from "../agent/host-turn.ts";
-import { fetchImageAttachments } from "../linear/attachments.ts";
+import { fetchAttachments, routeAttachment } from "../linear/attachments.ts";
 import type { LinearClient } from "@linear/sdk";
 import { parseDecomposition } from "../agent/tasks.ts";
 import { fetchTeamStates, resolveTargetState, type Transition } from "../linear/workflow.ts";
@@ -228,14 +228,54 @@ export class Orchestrator {
     }
   }
 
-  // Pulls any Linear-hosted screenshot images out of the issue description,
-  // latest comment, and prior-session history text, and downloads them. Advisory:
-  // any failure inside fetchImageAttachments is already swallowed there — this
-  // wrapper exists so every call site has one line, not a try/catch each.
-  async #extractImages(ctx: IssueContext, history?: string): Promise<AgentTask["images"]> {
+  // Pulls every Linear-hosted attachment (screenshots, PDFs, and other files) out
+  // of the issue description, latest comment, and prior-session history text, and
+  // routes each by type (routeAttachment): image/PDF become native content blocks
+  // for the agent's first turn; everything else is written into ATTACHMENTS_DIR
+  // inside `sbx` (Tier 1) so the agent can read/convert it directly (pandoc,
+  // poppler-utils). With no sandbox (Tier 0's host turn, `sbx === null`), those
+  // files can't be written anywhere — their names are folded into `note` instead
+  // so the agent can escalate (ACTION: need_repo) to read them. Advisory
+  // end-to-end: any failure logs `[attachments]` and the run proceeds with none.
+  async #extractAttachments(ctx: IssueContext, sbx: AgentSandbox | null, history?: string): Promise<{
+    images?: AgentTask["images"];
+    documents?: AgentTask["documents"];
+    note?: string;
+  }> {
     const text = `${ctx.description}\n${ctx.comment}\n${history ?? ""}`;
-    const images = await fetchImageAttachments(this.#getToken, text, this.#fetch, this.#onUnauthorized);
-    return images.length > 0 ? images : undefined;
+    try {
+      const all = await fetchAttachments(this.#getToken, text, this.#fetch, this.#onUnauthorized);
+      const images: AgentTask["images"] = [];
+      const documents: AgentTask["documents"] = [];
+      const written: string[] = [];
+      const unavailable: string[] = [];
+      for (const a of all) {
+        const kind = routeAttachment(a);
+        if (kind === "image") {
+          images.push({ mediaType: a.mediaType, data: a.data });
+        } else if (kind === "pdf") {
+          documents.push({ mediaType: a.mediaType, data: a.data, filename: a.filename });
+        } else if (sbx) {
+          try {
+            await sbx.files.write(`${ATTACHMENTS_DIR}/${a.filename}`, Buffer.from(a.data, "base64").toString("binary"));
+            written.push(a.filename);
+          } catch (err) {
+            console.error(`[attachments] write ${a.filename} failed (advisory): ${err instanceof Error ? err.message : String(err)}`);
+          }
+        } else {
+          unavailable.push(a.filename);
+        }
+      }
+      const note = written.length
+        ? `Files attached to this issue are in ${ATTACHMENTS_DIR}/ (${written.join(", ")}). Read them directly; convert office/binary formats with pandoc or poppler-utils (pdftotext) as needed.`
+        : unavailable.length
+          ? `This issue has attached file(s) not available in this turn (${unavailable.join(", ")}). Respond with ACTION: need_repo if you need to read them.`
+          : undefined;
+      return { images: images.length ? images : undefined, documents: documents.length ? documents : undefined, note };
+    } catch (err) {
+      console.error(`[attachments] extract failed (advisory): ${err instanceof Error ? err.message : String(err)}`);
+      return {};
+    }
   }
 
   // Mint a per-run issue-scoped bearer token, run fn with the docs MCP config,
@@ -480,10 +520,16 @@ export class Orchestrator {
     await acts.thought("Thinking…");
     const history = ctx.issueId ? await this.#fetchThread?.(ctx.issueId).catch(() => "") : "";
     const docsContext = await this.#docContext(ctx);
+    // Tier 0 has no sandbox: images/PDFs still become content blocks, but text/
+    // binary attachments have nowhere to be written — their names fold into
+    // `note` so the agent can escalate to Tier 1 (need_repo) to read them.
+    const { images: hostImages, documents: hostDocuments, note: hostNote } =
+      await this.#extractAttachments(ctx, null, history || undefined);
     await this.#withDocsToken(ctx, async (docsMcp) => {
       const r: HostTurnResult = await this.#runHostTurn({
         apiKey: this.#config.anthropicApiKey, ctx, userMessage,
         history: history || undefined, docsContext, docsMcp,
+        images: hostImages, documents: hostDocuments, attachmentNote: hostNote,
       });
       const { action, body, sessionId, costUsd } = r;
 
@@ -495,8 +541,8 @@ export class Orchestrator {
           await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), this.#store.get(ctx.agentSessionId)?.branch ?? null);
           const hist = await this.#timed(ctx.agentSessionId, "history", () =>
             prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread));
-          const images = await this.#extractImages(ctx, hist);
-          return this.#trackedRun(ctx.agentSessionId, "converse", sbx, converseTask(ctx, userMessage, map, hist, images, docsContext, docsMcp), acts);
+          const { images, documents, note } = await this.#extractAttachments(ctx, sbx, hist);
+          return this.#trackedRun(ctx.agentSessionId, "converse", sbx, converseTask(ctx, userMessage, map, hist, images, docsContext, docsMcp, documents, note), acts);
         });
         this.#store.setSandbox(ctx.agentSessionId, null);
         const text = result?.kind === "result" && result.text ? result.text : "";
@@ -595,10 +641,10 @@ export class Orchestrator {
       const history = await this.#timed(ctx.agentSessionId, "history", () =>
         prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
       );
-      const images = await this.#extractImages(ctx, history);
+      const { images, documents, note } = await this.#extractAttachments(ctx, sbx, history);
       const docsContext = await this.#docContext(ctx);
       return this.#withDocsToken(ctx, (docsMcp) =>
-        this.#trackedRun(ctx.agentSessionId, "plan", sbx, planTask(ctx, map, history, images, docsContext, docsMcp), acts),
+        this.#trackedRun(ctx.agentSessionId, "plan", sbx, planTask(ctx, map, history, images, docsContext, docsMcp, documents, note), acts),
       );
     });
 
@@ -769,10 +815,10 @@ export class Orchestrator {
       const history = await this.#timed(ctx.agentSessionId, "history", () =>
         prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
       );
-      const images = await this.#extractImages(ctx, history);
+      const { images, documents, note } = await this.#extractAttachments(ctx, sbx, history);
       const docsContext = await this.#docContext(ctx);
       const r = await this.#withDocsToken(ctx, (docsMcp) =>
-        this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map, workBranch, history, images, docsContext, docsMcp), acts),
+        this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map, workBranch, history, images, docsContext, docsMcp, documents, note), acts),
       );
       // Persist the PR URL BEFORE self-review: the review run deletes and
       // rewrites RESULT_FILE, so a restart (or stop) during self-review would

@@ -8,7 +8,7 @@ import { join } from "node:path";
 const template = Template({ fileContextPath: join(import.meta.dirname, "..") })
   .fromUbuntuImage("24.04")
   .setUser("root")
-  .aptInstall(["curl", "git", "ca-certificates", "python3", "python3-venv", "python3-pip"])
+  .aptInstall(["curl", "git", "ca-certificates", "python3", "python3-venv", "python3-pip", "pandoc", "poppler-utils"])
   // Node 24 (NodeSource) + gh (GitHub apt repo) — baked so cold sandboxes are ready.
   .runCmd("curl -fsSL https://deb.nodesource.com/setup_24.x | bash -")
   .aptInstall(["nodejs"])

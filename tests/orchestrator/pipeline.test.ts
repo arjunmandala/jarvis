@@ -343,6 +343,7 @@ function makeOrchWithFakeSandbox(
     fetchParent?: (issueId: string) => Promise<{ id: string; title: string; description: string } | null>;
     docsTokens?: RunTokenRegistry;
     fetchImpl?: typeof fetch;
+    writes?: { path: string; data: string }[];
   },
 ): Orchestrator {
   const resultJson = opts.result ? JSON.stringify(opts.result) : "{}";
@@ -350,7 +351,9 @@ function makeOrchWithFakeSandbox(
     sandboxId: "fake-sbx",
     files: {
       read: async () => resultJson,
-      write: async () => undefined,
+      write: async (path: string, data: string) => {
+        opts.writes?.push({ path, data });
+      },
     },
     commands: {
       run: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
@@ -518,6 +521,49 @@ describe("onCreated converse (two-tier)", () => {
     const ctx = { ...ctxFor("s_child2", "child"), parentTitle: "already here" };
     await orch.onCreated(ctx);
     expect(fetchParent).not.toHaveBeenCalled();
+    store.close();
+  });
+});
+
+// Task 13: non-image/PDF attachments referenced in the issue text get downloaded
+// and written into the sandbox's ATTACHMENTS_DIR once a Tier 1 run happens, with
+// a pointer note folded into the task goal (captured via the fake sandbox's
+// files.write of /tmp/jarvis-task.json, the same file runAgent uses to hand the
+// task to runner.mjs).
+describe("attachment routing into the sandbox", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("writes a non-image/pdf attachment into ATTACHMENTS_DIR and notes it in the goal", async () => {
+    const store = new SessionStore(":memory:");
+    const log: string[] = [];
+    const writes: { path: string; data: string }[] = [];
+    const ctx: IssueContext = {
+      agentSessionId: "s_att", organizationId: "org", issueId: "iss_att", teamId: "team_1",
+      title: "Read the spec",
+      description: "See the attached doc https://uploads.linear.app/abc/spec.docx for details.",
+      comment: "", promptContext: "",
+    };
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      writes,
+      runHostTurn: async () => ({
+        text: "ACTION: need_repo\nLet me pull up the code…",
+        action: "need_repo", body: "Let me pull up the code…", sessionId: null, costUsd: null,
+      }),
+      result: {
+        kind: "result", subtype: "success", text: "ACTION: reply\nok",
+        costUsd: 0.1, sessionId: "s", usage: {}, numTurns: 1,
+      },
+    });
+    await orch.onCreated(ctx);
+
+    const attWrite = writes.find((w) => w.path.startsWith("/home/user/jarvis-attachments/"));
+    expect(attWrite?.path).toBe("/home/user/jarvis-attachments/spec.docx");
+
+    const taskWrite = writes.find((w) => w.path === "/tmp/jarvis-task.json");
+    expect(taskWrite).toBeTruthy();
+    const task = JSON.parse(taskWrite!.data);
+    expect(task.goal).toContain("jarvis-attachments");
+    expect(task.goal).toContain("spec.docx");
     store.close();
   });
 });

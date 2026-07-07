@@ -19,6 +19,9 @@ export interface AgentTask {
   // issue/comments) — passed to the agent's first turn as vision blocks alongside
   // goal's text. Undefined for tasks with no attachments found.
   images?: { mediaType: string; data: string }[];
+  // Base64 PDF attachments — passed to the agent's first turn as native `document`
+  // content blocks alongside goal's text (runner.mjs). Undefined when none found.
+  documents?: { mediaType: string; data: string; filename: string }[];
   // Docs MCP server config — registered by runner.mjs so the agent can pull
   // Linear docs / thread / prior run events on demand. Undefined → not registered.
   docsMcp?: DocsMcpConfig;
@@ -170,6 +173,15 @@ export function docsBlock(docsContext?: string): string {
   return `\n\n---\nLinear documents (attached to this ticket/project):\n${docsContext}`;
 }
 
+// Per-run content only — same cache rule as docsBlock. `note` is a short
+// pointer rendered by Orchestrator#extractAttachments (e.g. where non-image/PDF
+// attachments were written inside the sandbox, or which ones are unavailable
+// in a Tier 0/no-sandbox turn).
+export function attachmentsBlock(note?: string): string {
+  if (!note) return "";
+  return `\n\n---\n${note}`;
+}
+
 export function planTask(
   ctx: IssueContext,
   repoMap?: string,
@@ -177,9 +189,11 @@ export function planTask(
   images?: AgentTask["images"],
   docsContext?: string,
   docsMcp?: DocsMcpConfig,
+  documents?: AgentTask["documents"],
+  attachmentNote?: string,
 ): AgentTask {
   return {
-    goal: `Produce an implementation plan for this issue.\n\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}${docsBlock(docsContext)}`,
+    goal: `Produce an implementation plan for this issue.\n\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}${docsBlock(docsContext)}${attachmentsBlock(attachmentNote)}`,
     cwd: REPO_DIR,
     model: "claude-sonnet-5",
     systemAppend: PLAN_APPEND,
@@ -189,6 +203,7 @@ export function planTask(
     effort: "medium", // planning is bounded read-only work; `high` over-explores
     images,
     docsMcp,
+    documents,
   };
 }
 
@@ -201,6 +216,8 @@ export function reviseTask(
   images?: AgentTask["images"],
   docsContext?: string,
   docsMcp?: DocsMcpConfig,
+  documents?: AgentTask["documents"],
+  attachmentNote?: string,
 ): AgentTask {
   return {
     goal:
@@ -208,7 +225,7 @@ export function reviseTask(
       `everything the feedback doesn't touch. Re-check the repo where the feedback changes assumptions. ` +
       `Your FINAL message must be the complete revised plan in Markdown — that text is returned verbatim to ` +
       `the human for approval.\n\n` +
-      `Feedback:\n${feedback}\n\n---\nPrevious plan:\n${previousPlan}\n\n---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}${docsBlock(docsContext)}`,
+      `Feedback:\n${feedback}\n\n---\nPrevious plan:\n${previousPlan}\n\n---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}${docsBlock(docsContext)}${attachmentsBlock(attachmentNote)}`,
     cwd: REPO_DIR,
     model: "claude-sonnet-5",
     systemAppend: PLAN_APPEND,
@@ -218,6 +235,7 @@ export function reviseTask(
     effort: "medium",
     images,
     docsMcp,
+    documents,
   };
 }
 
@@ -270,6 +288,8 @@ export function implementTask(
   images?: AgentTask["images"],
   docsContext?: string,
   docsMcp?: DocsMcpConfig,
+  documents?: AgentTask["documents"],
+  attachmentNote?: string,
 ): AgentTask {
   const route = routeImplement(approvedPlan);
   const branchBlock = workBranch
@@ -288,7 +308,7 @@ export function implementTask(
       `already exist), run \`gh pr view --json url -q .url\` and make your FINAL message EXACTLY that URL ` +
       `alone — no prose, no markdown. If PR creation fails, your FINAL message must instead start with ` +
       `\`PR_FAILED:\` followed by the reason.\n\n` +
-      `${approvedPlan}\n\n---\nOriginal issue:\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}${docsBlock(docsContext)}`,
+      `${approvedPlan}\n\n---\nOriginal issue:\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}${docsBlock(docsContext)}${attachmentsBlock(attachmentNote)}`,
     cwd: REPO_DIR,
     model: route.model, // small/unambiguous → Sonnet 5; large or refactor → Opus 4.8
     systemAppend: IMPLEMENT_APPEND,
@@ -298,6 +318,7 @@ export function implementTask(
     effort: route.effort,
     images,
     docsMcp,
+    documents,
   };
 }
 

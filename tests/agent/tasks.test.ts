@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask, parseDecomposition, parentBlock, issueBlock, docsBlock, ALL_REPO_TOOLS, type DocsMcpConfig } from "../../src/agent/tasks.ts";
+import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask, parseDecomposition, parentBlock, issueBlock, docsBlock, attachmentsBlock, ALL_REPO_TOOLS, type DocsMcpConfig } from "../../src/agent/tasks.ts";
 import type { IssueContext } from "../../src/linear/context.ts";
 
 const ctx: IssueContext = {
@@ -406,6 +406,46 @@ describe("chatTask", () => {
     const t = chatTask(ctx);
     expect(t.systemAppend).toMatch(/FINAL message/);
     expect(t.systemAppend).toMatch(/READ-ONLY/i);
+  });
+});
+
+describe("attachmentsBlock", () => {
+  it("renders empty when absent and a labeled block when present", () => {
+    expect(attachmentsBlock(undefined)).toBe("");
+    expect(attachmentsBlock("Files attached: spec.pdf")).toContain("Files attached: spec.pdf");
+  });
+});
+
+describe("documents + attachmentNote", () => {
+  const documents = [{ mediaType: "application/pdf", data: "BBBB", filename: "spec.pdf" }];
+
+  it("carries document content blocks and an attachments note (undefined when omitted)", () => {
+    const t = planTask(ctx, undefined, undefined, undefined, undefined, undefined);
+    expect(t.documents).toBeUndefined();
+  });
+
+  it("planTask carries documents and folds attachmentNote into the goal", () => {
+    const t = planTask(ctx, undefined, undefined, undefined, undefined, undefined, documents, "Files attached: spec.pdf");
+    expect(t.documents).toEqual(documents);
+    expect(t.goal).toContain("Files attached: spec.pdf");
+  });
+
+  it("reviseTask carries documents and attachmentNote", () => {
+    const t = reviseTask(ctx, "plan", "feedback", undefined, undefined, undefined, undefined, undefined, documents, "note text");
+    expect(t.documents).toEqual(documents);
+    expect(t.goal).toContain("note text");
+  });
+
+  it("implementTask carries documents and attachmentNote", () => {
+    const t = implementTask(ctx, "## Plan", undefined, undefined, undefined, undefined, undefined, undefined, documents, "note text");
+    expect(t.documents).toEqual(documents);
+    expect(t.goal).toContain("note text");
+  });
+
+  it("goal is byte-identical to before when documents/attachmentNote are absent", () => {
+    expect(planTask(ctx).documents).toBeUndefined();
+    expect(planTask(ctx).goal).not.toMatch(/Files attached/);
+    expect(implementTask(ctx, "## Plan").documents).toBeUndefined();
   });
 });
 

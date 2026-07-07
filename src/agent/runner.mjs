@@ -64,7 +64,7 @@ const pump = setInterval(() => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const userMsg = (text, images) => ({
+const userMsg = (text, images, documents) => ({
   type: "user",
   message: {
     role: "user",
@@ -72,6 +72,10 @@ const userMsg = (text, images) => ({
       ...(images ?? []).map((img) => ({
         type: "image",
         source: { type: "base64", media_type: img.mediaType, data: img.data },
+      })),
+      ...(documents ?? []).map((doc) => ({
+        type: "document",
+        source: { type: "base64", media_type: doc.mediaType, data: doc.data },
       })),
       { type: "text", text },
     ],
@@ -84,7 +88,7 @@ const userMsg = (text, images) => ({
 // turn finishes (result message seen) with nothing queued — that result is final.
 let turnDone = false;
 async function* promptStream() {
-  yield userMsg(task.goal, task.images);
+  yield userMsg(task.goal, task.images, task.documents);
   for (;;) {
     if (steering.length > 0) {
       turnDone = false;
