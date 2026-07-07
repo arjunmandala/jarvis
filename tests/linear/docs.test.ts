@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   sliceWithMarker, DOC_FETCH_CEILING, searchDocuments, getDocumentContent,
+  extractPastedDocSlugs, renderDocContext, assembleDocContext, DOC_CONTEXT_CAP,
 } from "../../src/linear/docs.ts";
 
 function gqlResponse(data: unknown): Response {
@@ -52,5 +53,46 @@ describe("getDocumentContent", () => {
   it("returns null when the document is missing or the call fails", async () => {
     expect(await getDocumentContent("t", "d1", { fetchImpl: (async () => gqlResponse({ document: null })) as unknown as typeof fetch })).toBeNull();
     expect(await getDocumentContent("t", "d1", { fetchImpl: (async () => new Response("", { status: 500 })) as unknown as typeof fetch })).toBeNull();
+  });
+});
+
+describe("extractPastedDocSlugs", () => {
+  it("pulls the slugId from pasted Linear document links", () => {
+    const text = "see https://linear.app/acme/document/design-notes-9f8e7d6c5b4a and https://linear.app/acme/document/rfc-1234abcd";
+    expect(extractPastedDocSlugs(text)).toEqual(["9f8e7d6c5b4a", "1234abcd"]);
+  });
+  it("returns [] with no doc links", () => {
+    expect(extractPastedDocSlugs("nothing here")).toEqual([]);
+  });
+});
+
+describe("renderDocContext", () => {
+  it("emits full docs, project overview, and an index of the rest", () => {
+    const out = renderDocContext({
+      fullDocs: [{ id: "d1", title: "Runbook", content: "step one" }],
+      projectContent: { id: "p1", title: "Project", content: "overview text" },
+      projectDocIndex: [{ id: "d9", title: "Old ADR" }],
+    })!;
+    expect(out).toContain("Runbook");
+    expect(out).toContain("step one");
+    expect(out).toContain("overview text");
+    expect(out).toContain("Old ADR");
+    expect(out).toContain("get_document");
+  });
+  it("labels a doc cut with a get_document marker naming the id", () => {
+    const big = "x".repeat(DOC_CONTEXT_CAP + 500);
+    const out = renderDocContext({ fullDocs: [{ id: "dBIG", title: "Big", content: big }], projectContent: null, projectDocIndex: [] })!;
+    expect(out).toContain('[truncated — full doc: get_document("dBIG")]');
+  });
+  it("returns undefined when there is nothing to inject", () => {
+    expect(renderDocContext({ fullDocs: [], projectContent: null, projectDocIndex: [] })).toBeUndefined();
+  });
+});
+
+describe("assembleDocContext", () => {
+  it("returns undefined for a null issue and never throws on fetch failure", async () => {
+    expect(await assembleDocContext("t", null, "")).toBeUndefined();
+    const bad = (async () => new Response("", { status: 500 })) as unknown as typeof fetch;
+    expect(await assembleDocContext("t", "iss_1", "text", { fetchImpl: bad })).toBeUndefined();
   });
 });

@@ -91,3 +91,109 @@ export async function getDocumentContent(
   if (!d?.id) return null;
   return { id: d.id, title: d.title ?? "", content: d.content ?? "" };
 }
+
+// Full-content injection budget (Issue.documents + pasted docs + project
+// overview). ponytail: char cap, keep-what-fits with a per-doc marker — the
+// remaining project docs go in as a one-line index instead of body.
+export const DOC_CONTEXT_CAP = 15_000;
+
+const DOC_LINK_RE = /linear\.app\/[^/\s]+\/document\/[^)\s]*-([A-Za-z0-9]+)/g;
+
+/** slugId is the trailing token after the last '-' in a Linear document URL. */
+export function extractPastedDocSlugs(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(DOC_LINK_RE)) if (!out.includes(m[1])) out.push(m[1]);
+  return out;
+}
+
+export interface IssueDocsBundle {
+  fullDocs: { id: string; title: string; content: string }[];
+  projectContent: { id: string; title: string; content: string } | null;
+  projectDocIndex: { id: string; title: string }[];
+}
+
+// One combined query: the ticket's attached docs, its project overview + name,
+// and the project's remaining docs (for the index). Pasted-link docs are resolved
+// separately by slugId and merged into fullDocs.
+const ISSUE_DOCS_QUERY =
+  `query($id: String!) { issue(id: $id) {
+     documents { nodes { id title content } }
+     project { id name content documents { nodes { id title } } }
+   } }`;
+const DOC_BY_SLUG_QUERY = `query($slug: String!) { documents(filter: { slugId: { eq: $slug } }, first: 1) { nodes { id title content } } }`;
+
+/** Render the injected block. Full docs are emitted until the cap; the doc that
+ *  overflows is cut with a marker naming its id, and any later full docs fall to
+ *  the index. Project docs not already shown appear as one-line index entries. */
+export function renderDocContext(bundle: IssueDocsBundle, cap: number = DOC_CONTEXT_CAP): string | undefined {
+  const shownIds = new Set<string>();
+  const sections: string[] = [];
+  let used = 0;
+  const emit = (id: string, title: string, content: string) => {
+    shownIds.add(id);
+    const header = `### ${title} (id: ${id})\n`;
+    const remaining = cap - used - header.length;
+    if (remaining <= 0) {
+      sections.push(`${header}[truncated — full doc: get_document("${id}")]`);
+      return;
+    }
+    if (content.length > remaining) {
+      sections.push(`${header}${content.slice(0, remaining)}\n[truncated — full doc: get_document("${id}")]`);
+      used = cap;
+    } else {
+      sections.push(`${header}${content}`);
+      used += header.length + content.length;
+    }
+  };
+
+  if (bundle.projectContent) emit(bundle.projectContent.id, `Project overview: ${bundle.projectContent.title}`, bundle.projectContent.content);
+  for (const d of bundle.fullDocs) emit(d.id, d.title, d.content);
+
+  const index = bundle.projectDocIndex.filter((d) => !shownIds.has(d.id));
+  if (index.length > 0) {
+    sections.push(
+      `Other project documents (fetch with get_document when relevant):\n` +
+        index.map((d) => `- ${d.title} (id: ${d.id})`).join("\n"),
+    );
+  }
+  if (sections.length === 0) return undefined;
+  return `Linear documents attached to this ticket and project:\n\n${sections.join("\n\n")}`;
+}
+
+/** Assemble the up-front doc context for an issue. Advisory: undefined on any
+ *  failure or when there's nothing to inject. */
+export async function assembleDocContext(
+  token: TokenSource,
+  issueId: string | null,
+  issueText: string,
+  opts: { fetchImpl?: typeof fetch; onUnauthorized?: () => Promise<string> } = {},
+): Promise<string | undefined> {
+  if (!issueId) return undefined;
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  try {
+    const data = await gql<{ issue?: {
+      documents?: { nodes?: { id: string; title?: string; content?: string }[] };
+      project?: { id: string; name?: string; content?: string; documents?: { nodes?: { id: string; title?: string }[] } } | null;
+    } }>(token, ISSUE_DOCS_QUERY, { id: issueId }, fetchImpl, opts.onUnauthorized);
+    if (!data?.issue) return undefined;
+
+    const fullDocs = (data.issue.documents?.nodes ?? []).map((d) => ({ id: d.id, title: d.title ?? "", content: d.content ?? "" }));
+
+    // Resolve pasted doc links (dedupe against already-attached docs).
+    const seen = new Set(fullDocs.map((d) => d.id));
+    for (const slug of extractPastedDocSlugs(issueText)) {
+      const sd = await gql<{ documents?: { nodes?: { id: string; title?: string; content?: string }[] } }>(token, DOC_BY_SLUG_QUERY, { slug }, fetchImpl, opts.onUnauthorized);
+      const node = sd?.documents?.nodes?.[0];
+      if (node && !seen.has(node.id)) { seen.add(node.id); fullDocs.push({ id: node.id, title: node.title ?? "", content: node.content ?? "" }); }
+    }
+
+    const proj = data.issue.project;
+    const projectContent = proj?.content ? { id: proj.id, title: proj.name ?? "Project", content: proj.content } : null;
+    const projectDocIndex = (proj?.documents?.nodes ?? []).map((d) => ({ id: d.id, title: d.title ?? "" }));
+
+    return renderDocContext({ fullDocs, projectContent, projectDocIndex });
+  } catch (err) {
+    console.error(`[docs] assembleDocContext failed (advisory): ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
+}
