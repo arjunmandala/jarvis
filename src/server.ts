@@ -7,6 +7,7 @@ import { makeActivities } from "./linear/activities.ts";
 import { extractContext, promptedBody } from "./linear/context.ts";
 import { Orchestrator } from "./orchestrator/pipeline.ts";
 import { LinearTokenManager } from "./linear/token-manager.ts";
+import { RunTokenRegistry, handleDocsMcp } from "./mcp/docs-server.ts";
 
 export function makeServer(config: Config): Hono {
   const app = new Hono();
@@ -33,6 +34,9 @@ export function makeServer(config: Config): Hono {
   const linearFor = () => makeLinearClient(getToken());
   const webhook = new LinearWebhookClient(config.linear.webhookSecret);
   const handler = webhook.createHandler();
+  // Shared between the /mcp/docs route (auths tokens) and the orchestrator
+  // (mints/revokes per run). In-memory, like the inflight set below.
+  const docsTokens = new RunTokenRegistry();
   const orchestrator = new Orchestrator(
     config,
     store,
@@ -46,6 +50,7 @@ export function makeServer(config: Config): Hono {
     undefined, // classifyFollowUp: default Haiku classifier
     undefined, // runHostTurn: default host-side turn
     makeParentFetcher(getToken, fetch, onUnauthorized),
+    docsTokens, // NEW (Task 11)
   );
 
   // Boot reconciliation: recover or fail-loud every session left in-flight by a
@@ -214,6 +219,18 @@ export function makeServer(config: Config): Hono {
   });
 
   app.post("/webhook", async (c) => handler(c.req.raw)); // raw body unconsumed → signature verifies
+
+  app.post("/mcp/docs", async (c) => {
+    let body: unknown = null;
+    try { body = await c.req.json(); } catch { /* malformed → treated as no method */ }
+    const { status, json } = await handleDocsMcp(
+      { registry: docsTokens, store, linearToken: getToken, fetchThread: makeThreadFetcher(getToken, fetch, onUnauthorized), onUnauthorized },
+      c.req.header("authorization") ?? null,
+      body,
+    );
+    if (json === null) return c.body(null, status as 202);
+    return c.json(json as object, status as 200 | 401);
+  });
 
   return app;
 }

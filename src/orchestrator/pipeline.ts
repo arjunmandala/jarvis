@@ -16,6 +16,7 @@ import { fetchImageAttachments } from "../linear/attachments.ts";
 import type { LinearClient } from "@linear/sdk";
 import { parseDecomposition } from "../agent/tasks.ts";
 import { fetchTeamStates, resolveTargetState, type Transition } from "../linear/workflow.ts";
+import type { RunTokenRegistry } from "../mcp/docs-server.ts";
 
 // The subset of LinearClient the orchestrator needs for sub-issue creation
 // (Task 9) and workflow-state moves (Task 11-12) — kept narrow so tests can
@@ -116,6 +117,9 @@ export class Orchestrator {
   // means no parent context — never blocks a run.
   #fetchParent?: (issueId: string) => Promise<{ id: string; title: string; description: string } | null>;
   #jarvisActorId?: string;
+  // Wired in Task 11 (mints/revokes per-run docs-MCP bearer tokens). Assigned
+  // but unused until then — Task 11 adds the helpers that read it.
+  #docsTokens?: RunTokenRegistry;
   // Live runs: comments arriving while a run executes are injected into its
   // sandbox (steering). In-memory like the server's inflight set — a restart
   // loses steering ability for that run, which reconcile already fails/recovers.
@@ -138,6 +142,7 @@ export class Orchestrator {
     classifyFollowUp?: (text: string) => Promise<"revise" | "review">,
     runHostTurn?: typeof defaultRunHostTurn,
     fetchParent?: (issueId: string) => Promise<{ id: string; title: string; description: string } | null>,
+    docsTokens?: RunTokenRegistry,
   ) {
     this.#config = config;
     this.#store = store;
@@ -152,6 +157,7 @@ export class Orchestrator {
       classifyFollowUp ?? ((text) => classifyPrRevision(this.#config.anthropicApiKey, text));
     this.#runHostTurn = runHostTurn ?? defaultRunHostTurn;
     this.#fetchParent = fetchParent;
+    this.#docsTokens = docsTokens;
     // Default: a real e2b reconnect. Tests inject a fake so nothing touches e2b/network.
     this.#connect =
       connect ??
