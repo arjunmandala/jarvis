@@ -51,6 +51,10 @@ export interface RunLog {
   jsonl: string;
 }
 
+// One prior run's index entry for get_run_events (runId omitted): lets the agent
+// pick a run before pulling its (possibly large) JSONL.
+export interface RunIndexEntry { runId: number; taskType: string; createdAt: string; sizeBytes: number }
+
 // One session_events row: a phase transition (ms NULL) or a host-side timing
 // (sandbox_create / clone / serena_index / history) in elapsed milliseconds.
 export interface SessionEvent {
@@ -522,6 +526,45 @@ export class SessionStore {
         .join("\n");
       return { runId: r.id, taskType: r.task_type, startedAt: r.started_at, outcome: r.outcome, jsonl };
     });
+  }
+
+  // Run index for one issue, newest run first — every run of every session on
+  // the issue. sizeBytes is the assembled JSONL length so the agent can gauge
+  // cost before fetching. Issue-scoped: the join to sessions is the security
+  // boundary for the docs MCP get_run_events tool.
+  getRunIndexByIssue(issueId: string): RunIndexEntry[] {
+    const runs = this.#db
+      .prepare(
+        `SELECT r.id AS id, r.task_type AS task_type, r.started_at AS started_at
+         FROM runs r JOIN sessions s ON r.agent_session_id = s.agent_session_id
+         WHERE s.issue_id = ? ORDER BY r.id DESC`,
+      )
+      .all(issueId) as { id: number; task_type: string; started_at: string }[];
+    return runs.map((r) => {
+      const rows = this.#db
+        .prepare(`SELECT SUM(LENGTH(payload)) AS n FROM run_events WHERE run_id = ?`)
+        .get(r.id) as { n: number | null };
+      return { runId: r.id, taskType: r.task_type, createdAt: r.started_at, sizeBytes: rows.n ?? 0 };
+    });
+  }
+
+  // The raw JSONL for one run, but ONLY if that run belongs to a session on
+  // `issueId` — returns null otherwise so a per-run token can never read another
+  // issue's runs. Same line shape as getRunLogsBySession's jsonl.
+  getRunJsonl(runId: number, issueId: string): string | null {
+    const owned = this.#db
+      .prepare(
+        `SELECT r.id FROM runs r JOIN sessions s ON r.agent_session_id = s.agent_session_id
+         WHERE r.id = ? AND s.issue_id = ?`,
+      )
+      .get(runId, issueId) as { id: number } | undefined;
+    if (!owned) return null;
+    const events = this.#db
+      .prepare(`SELECT ts, type, payload FROM run_events WHERE run_id = ? ORDER BY id ASC`)
+      .all(runId) as { ts: string; type: string; payload: string }[];
+    return events
+      .map((e) => `{"ts":${JSON.stringify(e.ts)},"type":${JSON.stringify(e.type)},"payload":${e.payload}}`)
+      .join("\n");
   }
 
   close(): void {

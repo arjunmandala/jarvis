@@ -456,3 +456,36 @@ describe("team_states cache", () => {
     });
   });
 });
+
+describe("issue-scoped run-event reads", () => {
+  function seeded(): SessionStore {
+    const s = new SessionStore(":memory:");
+    s.upsert("A", "done", "iss_1");
+    s.upsert("B", "done", "iss_2");
+    const rA = s.createRun("A", "implement", "o/r");
+    s.addRunEvent(rA, "tool_use", { kind: "tool_use", name: "Bash", input: { command: "npm test" } });
+    const rB = s.createRun("B", "plan", "o/r");
+    s.addRunEvent(rB, "assistant_text", { kind: "assistant_text", text: "hi" });
+    return s;
+  }
+
+  it("indexes only the asking issue's runs, newest first, with a byte size", () => {
+    const s = seeded();
+    const idx = s.getRunIndexByIssue("iss_1");
+    expect(idx).toHaveLength(1);
+    expect(idx[0]).toMatchObject({ taskType: "implement" });
+    expect(idx[0].sizeBytes).toBeGreaterThan(0);
+    s.close();
+  });
+
+  it("returns a run's jsonl only when the run belongs to the issue (scoping)", () => {
+    const s = seeded();
+    const idx1 = s.getRunIndexByIssue("iss_1");
+    const jsonl = s.getRunJsonl(idx1[0].runId, "iss_1");
+    expect(jsonl).toContain("npm test");
+    // A run from issue 2, requested with issue 1's scope, must be refused.
+    const idx2 = s.getRunIndexByIssue("iss_2");
+    expect(s.getRunJsonl(idx2[0].runId, "iss_1")).toBeNull();
+    s.close();
+  });
+});
