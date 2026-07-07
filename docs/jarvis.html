@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Jarvis: a coding agent that lives in Linear. An issue goes in, a pull request comes out: planned, built, and tested in a disposable sandbox, gated twice by a human.">
+<meta name="description" content="Jarvis: a coding agent that lives in Linear. An issue goes in, a pull request comes out: planned, built, and tested in a disposable sandbox, with a human merging the result.">
 <meta name="theme-color" content="#000000">
 <meta property="og:title" content="JARVIS — Agent Specification">
 <meta property="og:description" content="An issue goes in. A pull request comes out. Nothing ships without a human saying yes. Twice.">
@@ -313,7 +313,7 @@
     <div class="boot-line">> linear webhook listener ........... <span class="ok">OK</span></div>
     <div class="boot-line">> e2b sandbox templates ............. <span class="ok">OK</span></div>
     <div class="boot-line">> reconciling interrupted runs ...... <span class="ok">0 FOUND</span></div>
-    <div class="boot-line">> human gates ....................... <span class="ok">2 ARMED</span></div>
+    <div class="boot-line">> human merge gate .................. <span class="ok">ARMED</span></div>
     <div class="boot-line">> agent <span class="ok">ONLINE</span><span class="blink">▍</span></div>
   </div>
   <div class="boot-skip">click or press any key to skip</div>
@@ -330,7 +330,7 @@
     <span class="name">JARVIS</span>
     <span class="sys" aria-hidden="true">
       <span>sys <span class="live">ONLINE</span></span>
-      <span>gates <span class="live">2 / 2 ARMED</span></span>
+      <span>merge gate <span class="live">ARMED</span></span>
       <span id="clock" class="live">00:00:00</span>
     </span>
   </div>
@@ -363,7 +363,7 @@
   <!-- ============ SIGNAL PATH ============ -->
   <div class="signal rv">
     <div class="signal-scroll">
-      <svg viewBox="0 0 960 190" role="img" aria-label="Pipeline: Linear issue, plan, human approval gate, sandboxed implementation, pull request, human merge gate">
+      <svg viewBox="0 0 960 190" role="img" aria-label="Pipeline: Linear issue, plan agreed with a human, sandboxed implementation, pull request, human merge gate">
         <path class="svg-line" d="M 30 95 H 930" />
         <path class="svg-line-loop" d="M 388 88 C 370 40, 240 40, 222 84" />
         <path class="svg-line-loop" d="M 222 84 l -5 -8 M 222 84 l 8 -4" />
@@ -377,8 +377,7 @@
         <text class="svg-label" x="222" y="130" text-anchor="middle">PLAN</text>
         <text class="svg-sublabel" x="222" y="146" text-anchor="middle">sandbox · read-only</text>
 
-        <path class="svg-gate" d="M 400 77 L 418 95 L 400 113 L 382 95 Z"/>
-        <text class="svg-gatelabel" x="400" y="60" text-anchor="middle">HUMAN GATE 1</text>
+        <circle class="svg-node" cx="400" cy="95" r="7"/>
         <text class="svg-label" x="400" y="130" text-anchor="middle">PLAN OK</text>
         <text class="svg-sublabel" x="400" y="146" text-anchor="middle">agent sees you agree</text>
 
@@ -392,7 +391,7 @@
         <text class="svg-sublabel" x="750" y="146" text-anchor="middle">opened, never merged</text>
 
         <path class="svg-gate" d="M 890 77 L 908 95 L 890 113 L 872 95 Z"/>
-        <text class="svg-gatelabel" x="890" y="60" text-anchor="middle">HUMAN GATE 2</text>
+        <text class="svg-gatelabel" x="890" y="60" text-anchor="middle">HUMAN GATE</text>
         <text class="svg-label" x="890" y="130" text-anchor="middle">MERGE</text>
         <text class="svg-sublabel" x="890" y="146" text-anchor="middle">humans only</text>
 
@@ -418,7 +417,7 @@
     </div>
     <div class="rv" style="display:flex;flex-direction:column;gap:20px">
       <p>Jarvis is a coding agent for the company. Assign a Linear issue to it and it behaves the way a careful engineer would: it reads the codebase, asks questions if the request is really a question, posts a plan as a comment, and keeps talking it through. When you're agreed on the plan, it writes the code inside an isolated cloud sandbox, runs the tests, pushes a branch, and opens a GitHub pull request. Then it stops: merging is a human's job, permanently.</p>
-      <p><strong>Jarvis is glue, not an engine.</strong> It does not reimplement a planner, a debugger, or a review engine. It wires four existing systems together and owns only the connective tissue: a webhook receiver, a session store, an orchestrator state machine, the Linear&nbsp;⇄&nbsp;agent adapters, and the system prompts. Everything hard is delegated.</p>
+      <p>It doesn't reimplement a planner, a debugger, or a review engine. It wires four existing systems together and owns the connective tissue: a webhook receiver, a session store, an orchestrator state machine, the Linear&nbsp;⇄&nbsp;agent adapters, and the system prompts. Everything hard is delegated.</p>
     </div>
     <div class="glue">
       <div class="hud rv"><span class="corner"></span>
@@ -443,20 +442,10 @@
   <!-- ============ IDEOLOGY ============ -->
   <section>
     <div class="section-head rv">
-      <h2>Six positions the code refuses to compromise on</h2>
+      <h2>Four positions the code refuses to compromise on</h2>
     </div>
     <div class="tenets">
       <div class="tenet hud rv"><span class="corner"></span>
-        <svg viewBox="0 0 24 24"><path d="M8 8h8v8H8z"/><path d="M4 12h4M16 12h4M12 4v4M12 16v4"/></svg>
-        <h3>Glue, not engine</h3>
-        <p>If a mature system already does the job, Jarvis wires it in rather than rebuilding it. The repo's value is the seams, not the parts.</p>
-      </div>
-      <div class="tenet hud rv rv-d1"><span class="corner"></span>
-        <svg viewBox="0 0 24 24"><path d="M12 3l9 9-9 9-9-9z"/><path d="M12 9v4M12 16.5v.5"/></svg>
-        <h3>Two human gates</h3>
-        <p>No plan is implemented without approval; no PR is merged by Jarvis, ever. Both gates are structural: they cannot be bypassed in code.</p>
-      </div>
-      <div class="tenet hud rv rv-d2"><span class="corner"></span>
         <svg viewBox="0 0 24 24"><path d="M12 4v10"/><circle cx="12" cy="19" r="1.5"/><path d="M5 8l7-4 7 4"/></svg>
         <h3>Fail loud</h3>
         <p>Every error path both logs and posts to Linear. A session that dies silently is worse than one that says exactly how it died.</p>
@@ -643,8 +632,8 @@
   </section>
 
   <footer>
-    <span class="sig">JARVIS — glue, not engine</span>
-    <span>Two gates. No exceptions.</span>
+    <span class="sig">JARVIS</span>
+    <span>A teammate you assign tickets to.</span>
   </footer>
 
 </div>

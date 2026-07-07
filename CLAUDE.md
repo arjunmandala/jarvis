@@ -8,7 +8,7 @@ Jarvis is a coding agent for the company: a Linear issue gets assigned to Jarvis
 it clarifies, posts a plan, and on approval writes code, tests it in an E2B sandbox,
 and opens a GitHub PR for a human to approve. Full design/rationale: [`BUILD_PLAN.md`](./BUILD_PLAN.md).
 
-**Jarvis is glue, not an engine** — it does not reimplement a planner, debugger, or
+Jarvis does not reimplement a planner, debugger, or
 review engine. It wires together the Claude Agent SDK (the autonomous loop), the
 `superpowers` skills (methodology: brainstorming, writing-plans, systematic-debugging,
 code review), E2B (sandboxing), and Linear (the agent surface). The code this repo
@@ -311,11 +311,16 @@ auto-renewed Linear app-actor token).
 Column migrations are hand-rolled (`ALTER TABLE ... ADD COLUMN` guarded by a
 `pragma_table_info` check) since SQLite has no `ADD COLUMN IF NOT EXISTS`.
 
-### Human gates (do not bypass in code)
+### The merge gate (do not bypass in code)
 
-1. **Plan approval** — Jarvis blocks in `await_approval` until a Linear reply parses
-   as approval (`parseApproval`).
-2. **PR approval** — Jarvis opens the PR; it never merges.
+Jarvis opens the PR and **never merges** — a human does. This is the one gate
+enforced structurally in code.
+
+Whether an already-posted plan has been agreed is a conversational judgment, not
+a code gate: the converse agent decides and emits `ACTION: implement`, and
+`#dispatchConverse` refuses to implement a plan the human never saw. `parseStop`
+stays a deterministic keyword kill. (This is the b2 trade-off from the design
+doc — there is no structural `await_approval` gate.)
 
 ## Conventions specific to this repo
 
