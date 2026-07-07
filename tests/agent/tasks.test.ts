@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask, parseDecomposition, parentBlock, issueBlock } from "../../src/agent/tasks.ts";
+import { planTask, implementTask, mapTask, reviseTask, reviewTask, chatTask, parseDecomposition, parentBlock, issueBlock, docsBlock, ALL_REPO_TOOLS, type DocsMcpConfig } from "../../src/agent/tasks.ts";
 import type { IssueContext } from "../../src/linear/context.ts";
 
 const ctx: IssueContext = {
@@ -406,5 +406,27 @@ describe("chatTask", () => {
     const t = chatTask(ctx);
     expect(t.systemAppend).toMatch(/FINAL message/);
     expect(t.systemAppend).toMatch(/READ-ONLY/i);
+  });
+});
+
+describe("docs plumbing", () => {
+  it("ALL_REPO_TOOLS allows the docs MCP server", () => {
+    expect(ALL_REPO_TOOLS).toContain("mcp__docs");
+  });
+  it("docsBlock renders empty when absent (prompt-cache safe) and a labeled block when present", () => {
+    expect(docsBlock(undefined)).toBe("");
+    expect(docsBlock("DOC STUFF")).toContain("DOC STUFF");
+  });
+  it("planTask injects docsContext into the goal and carries docsMcp", () => {
+    const cfg: DocsMcpConfig = { url: "http://h/mcp/docs", token: "tok" };
+    const t = planTask(ctx, undefined, undefined, undefined, "INJECTED DOCS", cfg);
+    expect(t.goal).toContain("INJECTED DOCS");
+    expect(t.docsMcp).toEqual(cfg);
+  });
+  it("implementTask carries docsMcp and docsContext", () => {
+    const cfg: DocsMcpConfig = { url: "http://h/mcp/docs", token: "tok" };
+    const t = implementTask(ctx, "Type: chore\nScope: small\nplan", undefined, "jarvis/i", undefined, undefined, "DOCS", cfg);
+    expect(t.goal).toContain("DOCS");
+    expect(t.docsMcp).toEqual(cfg);
   });
 });

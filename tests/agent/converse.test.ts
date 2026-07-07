@@ -37,3 +37,10 @@ test("converseTask carries full repo tools and the user message in the goal", ()
   expect(t.systemAppend).toContain("ACTION:");
   expect(t.cwd).toBe("/home/user/repo");
 });
+
+test("converseTask injects docsContext and carries docsMcp", () => {
+  const cfg = { url: "http://h/mcp/docs", token: "tok" };
+  const t = converseTask(ctx, "hi", undefined, undefined, undefined, "DOCS BLOCK", cfg);
+  expect(t.goal).toContain("DOCS BLOCK");
+  expect(t.docsMcp).toEqual(cfg);
+});

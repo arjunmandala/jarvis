@@ -19,6 +19,14 @@ export interface AgentTask {
   // issue/comments) — passed to the agent's first turn as vision blocks alongside
   // goal's text. Undefined for tasks with no attachments found.
   images?: { mediaType: string; data: string }[];
+  // Docs MCP server config — registered by runner.mjs so the agent can pull
+  // Linear docs / thread / prior run events on demand. Undefined → not registered.
+  docsMcp?: DocsMcpConfig;
+}
+
+export interface DocsMcpConfig {
+  url: string;
+  token: string;
 }
 
 // Appended to both plan and implement system prompts. Fixed text — never fold
@@ -37,7 +45,7 @@ const CONVERSE_APPEND =
 // mapTask stays read-only on purpose (it must never edit).
 export const ALL_REPO_TOOLS = [
   "Read", "Glob", "Grep", "Bash", "Edit", "Write", "Monitor",
-  "WebSearch", "WebFetch", "Skill", "Agent", "mcp__serena", "mcp__jarvis__ask_user",
+  "WebSearch", "WebFetch", "Skill", "Agent", "mcp__serena", "mcp__docs", "mcp__jarvis__ask_user",
 ];
 
 export const TOOLING_APPEND =
@@ -155,14 +163,23 @@ export function historyBlock(history?: string): string {
   return `\n\n---\nHistory — prior sessions on this issue:\n${history}`;
 }
 
+// Per-run content only — same cache rule as historyBlock. The string arrives
+// pre-rendered from src/linear/docs.ts (assembleDocContext).
+export function docsBlock(docsContext?: string): string {
+  if (!docsContext) return "";
+  return `\n\n---\nLinear documents (attached to this ticket/project):\n${docsContext}`;
+}
+
 export function planTask(
   ctx: IssueContext,
   repoMap?: string,
   history?: string,
   images?: AgentTask["images"],
+  docsContext?: string,
+  docsMcp?: DocsMcpConfig,
 ): AgentTask {
   return {
-    goal: `Produce an implementation plan for this issue.\n\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}`,
+    goal: `Produce an implementation plan for this issue.\n\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}${docsBlock(docsContext)}`,
     cwd: REPO_DIR,
     model: "claude-sonnet-5",
     systemAppend: PLAN_APPEND,
@@ -171,6 +188,7 @@ export function planTask(
     maxBudgetUsd: 2,
     effort: "medium", // planning is bounded read-only work; `high` over-explores
     images,
+    docsMcp,
   };
 }
 
@@ -181,6 +199,8 @@ export function reviseTask(
   repoMap?: string,
   history?: string,
   images?: AgentTask["images"],
+  docsContext?: string,
+  docsMcp?: DocsMcpConfig,
 ): AgentTask {
   return {
     goal:
@@ -188,7 +208,7 @@ export function reviseTask(
       `everything the feedback doesn't touch. Re-check the repo where the feedback changes assumptions. ` +
       `Your FINAL message must be the complete revised plan in Markdown — that text is returned verbatim to ` +
       `the human for approval.\n\n` +
-      `Feedback:\n${feedback}\n\n---\nPrevious plan:\n${previousPlan}\n\n---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}`,
+      `Feedback:\n${feedback}\n\n---\nPrevious plan:\n${previousPlan}\n\n---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}${docsBlock(docsContext)}`,
     cwd: REPO_DIR,
     model: "claude-sonnet-5",
     systemAppend: PLAN_APPEND,
@@ -197,6 +217,7 @@ export function reviseTask(
     maxBudgetUsd: 2,
     effort: "medium",
     images,
+    docsMcp,
   };
 }
 
@@ -247,6 +268,8 @@ export function implementTask(
   workBranch?: string,
   history?: string,
   images?: AgentTask["images"],
+  docsContext?: string,
+  docsMcp?: DocsMcpConfig,
 ): AgentTask {
   const route = routeImplement(approvedPlan);
   const branchBlock = workBranch
@@ -265,7 +288,7 @@ export function implementTask(
       `already exist), run \`gh pr view --json url -q .url\` and make your FINAL message EXACTLY that URL ` +
       `alone — no prose, no markdown. If PR creation fails, your FINAL message must instead start with ` +
       `\`PR_FAILED:\` followed by the reason.\n\n` +
-      `${approvedPlan}\n\n---\nOriginal issue:\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}`,
+      `${approvedPlan}\n\n---\nOriginal issue:\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}${docsBlock(docsContext)}`,
     cwd: REPO_DIR,
     model: route.model, // small/unambiguous → Sonnet 5; large or refactor → Opus 4.8
     systemAppend: IMPLEMENT_APPEND,
@@ -274,6 +297,7 @@ export function implementTask(
     maxBudgetUsd: route.maxBudgetUsd,
     effort: route.effort,
     images,
+    docsMcp,
   };
 }
 
@@ -307,6 +331,8 @@ export function reviewTask(
   userMessage: string | null,
   repoMap?: string,
   history?: string,
+  docsContext?: string,
+  docsMcp?: DocsMcpConfig,
 ): AgentTask {
   return {
     goal:
@@ -319,7 +345,7 @@ export function reviewTask(
           `ask a question, answer it; if they suggest a change, assess it; otherwise review.\n\n`
         : "") +
       (plan ? `Approved plan this diff implements:\n${plan}\n\n` : "") +
-      `---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}`,
+      `---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}${docsBlock(docsContext)}`,
     cwd: REPO_DIR,
     model: "claude-sonnet-5",
     systemAppend: REVIEW_APPEND,
@@ -327,6 +353,7 @@ export function reviewTask(
     maxTurns: 40,
     maxBudgetUsd: 3,
     effort: "medium",
+    docsMcp,
   };
 }
 
@@ -361,9 +388,16 @@ const CHAT_APPEND =
   TOOLING_APPEND +
   CONVERSE_APPEND;
 
-export function chatTask(ctx: IssueContext, repoMap?: string, history?: string, images?: AgentTask["images"]): AgentTask {
+export function chatTask(
+  ctx: IssueContext,
+  repoMap?: string,
+  history?: string,
+  images?: AgentTask["images"],
+  docsContext?: string,
+  docsMcp?: DocsMcpConfig,
+): AgentTask {
   return {
-    goal: `Answer the human's question about this issue and the repository.\n\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}`,
+    goal: `Answer the human's question about this issue and the repository.\n\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}${docsBlock(docsContext)}`,
     cwd: REPO_DIR,
     model: "claude-sonnet-5",
     systemAppend: CHAT_APPEND,
@@ -372,5 +406,6 @@ export function chatTask(ctx: IssueContext, repoMap?: string, history?: string, 
     maxBudgetUsd: 1,
     effort: "medium",
     images,
+    docsMcp,
   };
 }

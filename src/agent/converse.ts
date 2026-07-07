@@ -1,7 +1,7 @@
 import type { IssueContext } from "../linear/context.ts";
 import { REPO_DIR } from "../sandbox/session.ts";
 import type { AgentTask } from "./tasks.ts";
-import { ALL_REPO_TOOLS, TOOLING_APPEND, issueBlock, repoMapBlock, historyBlock } from "./tasks.ts";
+import { ALL_REPO_TOOLS, TOOLING_APPEND, issueBlock, repoMapBlock, historyBlock, docsBlock, type DocsMcpConfig } from "./tasks.ts";
 
 export type ConverseAction = "reply" | "need_repo" | "plan" | "implement" | "stop";
 const VERBS = new Set<ConverseAction>(["reply", "need_repo", "plan", "implement", "stop"]);
@@ -50,12 +50,14 @@ export function converseTask(
   repoMap?: string,
   history?: string,
   images?: AgentTask["images"],
+  docsContext?: string,
+  docsMcp?: DocsMcpConfig,
 ): AgentTask {
   return {
     goal:
       `The human's latest message:\n${userMessage}\n\n` +
       `Respond per the PROTOCOL. Read the repo as needed to answer, plan, or decide.\n\n` +
-      `---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}`,
+      `---\n${issueBlock(ctx)}${repoMapBlock(repoMap)}${historyBlock(history)}${docsBlock(docsContext)}`,
     cwd: REPO_DIR,
     model: "claude-sonnet-5",
     systemAppend: CONVERSE_SYSTEM,
@@ -64,5 +66,6 @@ export function converseTask(
     maxBudgetUsd: 2,
     effort: "medium",
     images,
+    docsMcp,
   };
 }
