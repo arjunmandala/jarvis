@@ -17,6 +17,8 @@ import type { LinearClient } from "@linear/sdk";
 import { parseDecomposition } from "../agent/tasks.ts";
 import { fetchTeamStates, resolveTargetState, type Transition } from "../linear/workflow.ts";
 import type { RunTokenRegistry } from "../mcp/docs-server.ts";
+import { assembleDocContext } from "../linear/docs.ts";
+import type { DocsMcpConfig } from "../agent/tasks.ts";
 
 // The subset of LinearClient the orchestrator needs for sub-issue creation
 // (Task 9) and workflow-state moves (Task 11-12) — kept narrow so tests can
@@ -228,6 +230,27 @@ export class Orchestrator {
     const text = `${ctx.description}\n${ctx.comment}\n${history ?? ""}`;
     const images = await fetchImageAttachments(this.#getToken, text, fetch, this.#onUnauthorized);
     return images.length > 0 ? images : undefined;
+  }
+
+  // Mint a per-run issue-scoped bearer token, run fn with the docs MCP config,
+  // and revoke it after (finally: normal return, throw, or a mid-run stop-kill
+  // that rejects the in-flight runAgent all revoke). No registry wired (tests) →
+  // fn runs with no config, so goals stay byte-identical.
+  async #withDocsToken<T>(ctx: IssueContext, fn: (docsMcp?: DocsMcpConfig) => Promise<T>): Promise<T> {
+    if (!this.#docsTokens) return fn(undefined);
+    const token = this.#docsTokens.mint({ agentSessionId: ctx.agentSessionId, issueId: ctx.issueId });
+    try {
+      return await fn({ url: `${this.#config.publicBaseUrl}/mcp/docs`, token });
+    } finally {
+      this.#docsTokens.revoke(token);
+    }
+  }
+
+  // Up-front doc context (ticket + project docs, pasted doc links). Advisory:
+  // assembleDocContext swallows all failures and returns undefined.
+  async #docContext(ctx: IssueContext): Promise<string | undefined> {
+    const issueText = `${ctx.description}\n${ctx.comment}\n${ctx.promptContext}`;
+    return assembleDocContext(this.#getToken, ctx.issueId, issueText, { onUnauthorized: this.#onUnauthorized });
   }
 
   // Fill ctx.parent* for a sub-issue when the webhook payload didn't nest it.
@@ -450,37 +473,41 @@ export class Orchestrator {
   async #runConverseTurn(ctx: IssueContext, acts: Activities, userMessage: string): Promise<void> {
     await acts.thought("Thinking…");
     const history = ctx.issueId ? await this.#fetchThread?.(ctx.issueId).catch(() => "") : "";
-    const r: HostTurnResult = await this.#runHostTurn({
-      apiKey: this.#config.anthropicApiKey, ctx, userMessage, history: history || undefined,
-    });
-    const { action, body, sessionId, costUsd } = r;
-
-    if (action === "need_repo") {
-      await acts.thought("Let me pull up the code…");
-      const map = this.#store.getRepoMap(this.#config.targetRepo);
-      const result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
-        this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
-        await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), this.#store.get(ctx.agentSessionId)?.branch ?? null);
-        const hist = await this.#timed(ctx.agentSessionId, "history", () =>
-          prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread));
-        const images = await this.#extractImages(ctx, hist);
-        return this.#trackedRun(ctx.agentSessionId, "converse", sbx, converseTask(ctx, userMessage, map, hist, images), acts);
+    const docsContext = await this.#docContext(ctx);
+    await this.#withDocsToken(ctx, async (docsMcp) => {
+      const r: HostTurnResult = await this.#runHostTurn({
+        apiKey: this.#config.anthropicApiKey, ctx, userMessage,
+        history: history || undefined, docsContext, docsMcp,
       });
-      this.#store.setSandbox(ctx.agentSessionId, null);
-      const text = result?.kind === "result" && result.text ? result.text : "";
-      if (result?.kind === "result" && result.sessionId) this.#store.setSdkSessionId(ctx.agentSessionId, result.sessionId);
-      if (!text) {
-        await acts.error("I couldn't work that out — reply again to retry.").catch(() => undefined);
-        return; // stays in clarify, retryable
-      }
-      const parsed = parseConverseAction(text);
-      await this.#dispatchConverse(ctx, acts, parsed.action, parsed.body, costLine(result));
-      return;
-    }
+      const { action, body, sessionId, costUsd } = r;
 
-    if (sessionId) this.#store.setSdkSessionId(ctx.agentSessionId, sessionId);
-    const cost = costUsd != null ? `\n\n_Cost: $${costUsd.toFixed(4)}_` : "";
-    await this.#dispatchConverse(ctx, acts, action, body, cost);
+      if (action === "need_repo") {
+        await acts.thought("Let me pull up the code…");
+        const map = this.#store.getRepoMap(this.#config.targetRepo);
+        const result = await withSandbox(this.#sbxCfg(ctx.agentSessionId), async (sbx) => {
+          this.#store.setSandbox(ctx.agentSessionId, sbx.sandboxId);
+          await cloneRepo(sbx, this.#sbxCfg(ctx.agentSessionId), this.#store.get(ctx.agentSessionId)?.branch ?? null);
+          const hist = await this.#timed(ctx.agentSessionId, "history", () =>
+            prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread));
+          const images = await this.#extractImages(ctx, hist);
+          return this.#trackedRun(ctx.agentSessionId, "converse", sbx, converseTask(ctx, userMessage, map, hist, images, docsContext, docsMcp), acts);
+        });
+        this.#store.setSandbox(ctx.agentSessionId, null);
+        const text = result?.kind === "result" && result.text ? result.text : "";
+        if (result?.kind === "result" && result.sessionId) this.#store.setSdkSessionId(ctx.agentSessionId, result.sessionId);
+        if (!text) {
+          await acts.error("I couldn't work that out — reply again to retry.").catch(() => undefined);
+          return; // stays in clarify, retryable
+        }
+        const parsed = parseConverseAction(text);
+        await this.#dispatchConverse(ctx, acts, parsed.action, parsed.body, costLine(result));
+        return;
+      }
+
+      if (sessionId) this.#store.setSdkSessionId(ctx.agentSessionId, sessionId);
+      const cost = costUsd != null ? `\n\n_Cost: $${costUsd.toFixed(4)}_` : "";
+      await this.#dispatchConverse(ctx, acts, action, body, cost);
+    });
   }
 
   // Shared action dispatch for both tiers. `implement` is guarded on a posted plan.
@@ -563,7 +590,10 @@ export class Orchestrator {
         prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
       );
       const images = await this.#extractImages(ctx, history);
-      return this.#trackedRun(ctx.agentSessionId, "plan", sbx, planTask(ctx, map, history, images), acts);
+      const docsContext = await this.#docContext(ctx);
+      return this.#withDocsToken(ctx, (docsMcp) =>
+        this.#trackedRun(ctx.agentSessionId, "plan", sbx, planTask(ctx, map, history, images, docsContext, docsMcp), acts),
+      );
     });
 
     if (cloneFailed) {
@@ -734,7 +764,10 @@ export class Orchestrator {
         prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
       );
       const images = await this.#extractImages(ctx, history);
-      const r = await this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map, workBranch, history, images), acts);
+      const docsContext = await this.#docContext(ctx);
+      const r = await this.#withDocsToken(ctx, (docsMcp) =>
+        this.#trackedRun(ctx.agentSessionId, "implement", sbx, implementTask(ctx, plan, map, workBranch, history, images, docsContext, docsMcp), acts),
+      );
       // Persist the PR URL BEFORE self-review: the review run deletes and
       // rewrites RESULT_FILE, so a restart (or stop) during self-review would
       // otherwise lose the PR — or worse, reconcile would recover the review
@@ -855,7 +888,10 @@ export class Orchestrator {
         const history = await this.#timed(ctx.agentSessionId, "history", () =>
           prepareHistory(this.#store, sbx, ctx.issueId, this.#fetchThread),
         );
-        return this.#trackedRun(ctx.agentSessionId, "review", sbx, reviewTask(ctx, row.prUrl!, row.plan, replyText, map, history), acts);
+        const docsContext = await this.#docContext(ctx);
+        return this.#withDocsToken(ctx, (docsMcp) =>
+          this.#trackedRun(ctx.agentSessionId, "review", sbx, reviewTask(ctx, row.prUrl!, row.plan, replyText, map, history, docsContext, docsMcp), acts),
+        );
       });
     } catch (err) {
       console.error(`[review] ${ctx.agentSessionId} review run failed: ${err instanceof Error ? err.message : String(err)}`);

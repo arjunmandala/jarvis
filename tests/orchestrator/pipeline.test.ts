@@ -7,6 +7,7 @@ import type { IssueContext } from "../../src/linear/context.ts";
 import type { Config } from "../../src/config.ts";
 import type { LinearClient } from "@linear/sdk";
 import type { runHostTurn } from "../../src/agent/host-turn.ts";
+import { RunTokenRegistry } from "../../src/mcp/docs-server.ts";
 
 type RunHostTurn = typeof runHostTurn;
 
@@ -340,6 +341,7 @@ function makeOrchWithFakeSandbox(
     classifyFollowUp?: (text: string) => Promise<"revise" | "review">;
     runHostTurn?: RunHostTurn;
     fetchParent?: (issueId: string) => Promise<{ id: string; title: string; description: string } | null>;
+    docsTokens?: RunTokenRegistry;
   },
 ): Orchestrator {
   const resultJson = opts.result ? JSON.stringify(opts.result) : "{}";
@@ -357,11 +359,12 @@ function makeOrchWithFakeSandbox(
   };
   vi.spyOn(Sandbox, "create").mockResolvedValue(fakeSbx as unknown as Sandbox);
   return new Orchestrator(
-    { targetRepo: "o/r", linear: { accessToken: "" } } as Config, store, () => fakeActs(log),
+    { targetRepo: "o/r", linear: { accessToken: "" }, publicBaseUrl: "https://jarvis.example" } as Config, store, () => fakeActs(log),
     undefined, undefined, undefined, undefined, undefined, undefined,
     opts.classifyFollowUp,
     opts.runHostTurn,
     opts.fetchParent,
+    opts.docsTokens,
   );
 }
 
@@ -415,6 +418,47 @@ describe("onCreated converse (two-tier)", () => {
     expect(log.some((l) => l.startsWith("response:") && l.includes("add the endpoint"))).toBe(true);
     expect(log.some((l) => l.includes("ACTION:"))).toBe(false); // tag not leaked
     expect(store.get("s1")?.phase).toBe("clarify");
+    store.close();
+  });
+
+  // Task 11: a wired registry mints a per-run issue-scoped docs token, passes it
+  // to the host turn as docsMcp, and revokes it once the turn returns.
+  it("mints a docsMcp token for the host turn and revokes it after", async () => {
+    const store = new SessionStore(":memory:");
+    const log: string[] = [];
+    const registry = new RunTokenRegistry();
+    let seenToken: string | undefined;
+    let liveDuringTurn = false;
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      docsTokens: registry,
+      runHostTurn: async (opts) => {
+        seenToken = opts.docsMcp?.token;
+        expect(opts.docsMcp?.url).toContain("/mcp/docs");
+        // The token resolves to this run's issue while the turn is in flight.
+        liveDuringTurn = seenToken != null && registry.resolve(seenToken)?.issueId === "iss";
+        return { text: "ACTION: reply\nhi", action: "reply", body: "hi", sessionId: null, costUsd: null };
+      },
+    });
+    await orch.onCreated(ctxFor("s_docs", "Why Postgres?"));
+    expect(seenToken).toBeTruthy();
+    expect(liveDuringTurn).toBe(true);
+    // Revoked after the turn — resolve no longer finds it.
+    expect(registry.resolve(seenToken!)).toBeUndefined();
+    store.close();
+  });
+
+  it("passes no docsMcp to the host turn when no registry is wired", async () => {
+    const store = new SessionStore(":memory:");
+    const log: string[] = [];
+    let seenDocsMcp: unknown = "unset";
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      runHostTurn: async (opts) => {
+        seenDocsMcp = opts.docsMcp;
+        return { text: "ACTION: reply\nhi", action: "reply", body: "hi", sessionId: null, costUsd: null };
+      },
+    });
+    await orch.onCreated(ctxFor("s_nodocs", "Why Postgres?"));
+    expect(seenDocsMcp).toBeUndefined();
     store.close();
   });
 
