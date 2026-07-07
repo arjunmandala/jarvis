@@ -342,6 +342,7 @@ function makeOrchWithFakeSandbox(
     runHostTurn?: RunHostTurn;
     fetchParent?: (issueId: string) => Promise<{ id: string; title: string; description: string } | null>;
     docsTokens?: RunTokenRegistry;
+    fetchImpl?: typeof fetch;
   },
 ): Orchestrator {
   const resultJson = opts.result ? JSON.stringify(opts.result) : "{}";
@@ -358,6 +359,12 @@ function makeOrchWithFakeSandbox(
     kill: async () => undefined,
   };
   vi.spyOn(Sandbox, "create").mockResolvedValue(fakeSbx as unknown as Sandbox);
+  // Fake fetch so doc-context/image assembly never touches the real network.
+  // `issue: null` → assembleDocContext returns undefined → docsBlock("") → goals
+  // stay byte-identical. Callers can pass their own to spy on the calls.
+  const fetchImpl =
+    opts.fetchImpl ??
+    (vi.fn(async () => new Response(JSON.stringify({ data: { issue: null } }), { status: 200 })) as unknown as typeof fetch);
   return new Orchestrator(
     { targetRepo: "o/r", linear: { accessToken: "" }, publicBaseUrl: "https://jarvis.example" } as Config, store, () => fakeActs(log),
     undefined, undefined, undefined, undefined, undefined, undefined,
@@ -365,6 +372,7 @@ function makeOrchWithFakeSandbox(
     opts.runHostTurn,
     opts.fetchParent,
     opts.docsTokens,
+    fetchImpl,
   );
 }
 
@@ -444,6 +452,25 @@ describe("onCreated converse (two-tier)", () => {
     expect(liveDuringTurn).toBe(true);
     // Revoked after the turn — resolve no longer finds it.
     expect(registry.resolve(seenToken!)).toBeUndefined();
+    store.close();
+  });
+
+  // Regression guard: doc-context assembly must go through the injected fetch,
+  // never the real global fetch (tests never touch api.linear.app).
+  it("assembles doc context via the injected fetch, never a real api.linear.app call", async () => {
+    const store = new SessionStore(":memory:");
+    const log: string[] = [];
+    const fakeFetch = vi.fn(async () => new Response(JSON.stringify({ data: { issue: null } }), { status: 200 }));
+    const globalSpy = vi.spyOn(globalThis, "fetch");
+    const orch = makeOrchWithFakeSandbox(store, log, {
+      fetchImpl: fakeFetch as unknown as typeof fetch,
+      runHostTurn: async () => ({ text: "ACTION: reply\nhi", action: "reply", body: "hi", sessionId: null, costUsd: null }),
+    });
+    await orch.onCreated(ctxFor("s_fetch", "Why Postgres?"));
+    expect(fakeFetch).toHaveBeenCalled(); // doc-context assembly used our fake
+    const hitLinear = globalSpy.mock.calls.some((c) => String(c[0]).includes("api.linear.app"));
+    expect(hitLinear).toBe(false);
+    globalSpy.mockRestore();
     store.close();
   });
 

@@ -122,6 +122,10 @@ export class Orchestrator {
   // Wired in Task 11 (mints/revokes per-run docs-MCP bearer tokens). Assigned
   // but unused until then — Task 11 adds the helpers that read it.
   #docsTokens?: RunTokenRegistry;
+  // Injectable fetch so doc-context/image assembly never hits the real network
+  // in tests (assembleDocContext has no network-free short-circuit). Defaults to
+  // the global fetch in prod (server.ts omits the arg).
+  #fetch: typeof fetch;
   // Live runs: comments arriving while a run executes are injected into its
   // sandbox (steering). In-memory like the server's inflight set — a restart
   // loses steering ability for that run, which reconcile already fails/recovers.
@@ -145,6 +149,7 @@ export class Orchestrator {
     runHostTurn?: typeof defaultRunHostTurn,
     fetchParent?: (issueId: string) => Promise<{ id: string; title: string; description: string } | null>,
     docsTokens?: RunTokenRegistry,
+    fetchImpl?: typeof fetch,
   ) {
     this.#config = config;
     this.#store = store;
@@ -160,6 +165,7 @@ export class Orchestrator {
     this.#runHostTurn = runHostTurn ?? defaultRunHostTurn;
     this.#fetchParent = fetchParent;
     this.#docsTokens = docsTokens;
+    this.#fetch = fetchImpl ?? fetch;
     // Default: a real e2b reconnect. Tests inject a fake so nothing touches e2b/network.
     this.#connect =
       connect ??
@@ -228,7 +234,7 @@ export class Orchestrator {
   // wrapper exists so every call site has one line, not a try/catch each.
   async #extractImages(ctx: IssueContext, history?: string): Promise<AgentTask["images"]> {
     const text = `${ctx.description}\n${ctx.comment}\n${history ?? ""}`;
-    const images = await fetchImageAttachments(this.#getToken, text, fetch, this.#onUnauthorized);
+    const images = await fetchImageAttachments(this.#getToken, text, this.#fetch, this.#onUnauthorized);
     return images.length > 0 ? images : undefined;
   }
 
@@ -250,7 +256,7 @@ export class Orchestrator {
   // assembleDocContext swallows all failures and returns undefined.
   async #docContext(ctx: IssueContext): Promise<string | undefined> {
     const issueText = `${ctx.description}\n${ctx.comment}\n${ctx.promptContext}`;
-    return assembleDocContext(this.#getToken, ctx.issueId, issueText, { onUnauthorized: this.#onUnauthorized });
+    return assembleDocContext(this.#getToken, ctx.issueId, issueText, { fetchImpl: this.#fetch, onUnauthorized: this.#onUnauthorized });
   }
 
   // Fill ctx.parent* for a sub-issue when the webhook payload didn't nest it.
