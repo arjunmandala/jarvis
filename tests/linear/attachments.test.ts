@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { extractImageUrls, fetchImageAttachments } from "../../src/linear/attachments.ts";
+import { extractAttachmentUrls, fetchAttachments, routeAttachment } from "../../src/linear/attachments.ts";
 
 describe("extractImageUrls", () => {
   it("finds uploads.linear.app image links in markdown", () => {
@@ -83,5 +84,46 @@ describe("fetchImageAttachments", () => {
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
     const retryInit = fetchImpl.mock.calls[1][1] as RequestInit;
     expect(retryInit.headers).toMatchObject({ authorization: "Bearer fresh-token" });
+  });
+});
+
+function res(bytes: number, contentType: string): Response {
+  return new Response(new Uint8Array(bytes), { status: 200, headers: { "content-type": contentType } });
+}
+
+describe("extractAttachmentUrls", () => {
+  it("finds image, plain-link, and bare uploads.linear.app urls, deduped", () => {
+    const text =
+      "![img](https://uploads.linear.app/a.png) [doc](https://uploads.linear.app/b.pdf) " +
+      "raw https://uploads.linear.app/c.csv and dup https://uploads.linear.app/a.png";
+    expect(extractAttachmentUrls(text)).toEqual([
+      "https://uploads.linear.app/a.png",
+      "https://uploads.linear.app/b.pdf",
+      "https://uploads.linear.app/c.csv",
+    ]);
+  });
+});
+
+describe("routeAttachment", () => {
+  it("routes by content type", () => {
+    expect(routeAttachment({ url: "", filename: "", mediaType: "image/png", data: "" })).toBe("image");
+    expect(routeAttachment({ url: "", filename: "", mediaType: "application/pdf", data: "" })).toBe("pdf");
+    expect(routeAttachment({ url: "", filename: "", mediaType: "text/csv", data: "" })).toBe("text");
+    expect(routeAttachment({ url: "", filename: "", mediaType: "application/json", data: "" })).toBe("text");
+    expect(routeAttachment({ url: "", filename: "", mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", data: "" })).toBe("binary");
+  });
+});
+
+describe("fetchAttachments", () => {
+  it("downloads all formats and records filename + mediaType, skipping oversized", async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.endsWith(".pdf")) return res(10, "application/pdf");
+      if (url.endsWith(".csv")) return res(6 * 1024 * 1024, "text/csv"); // oversized → skipped
+      return res(4, "image/png");
+    });
+    const text = "![i](https://uploads.linear.app/a.png) [d](https://uploads.linear.app/b.pdf) https://uploads.linear.app/c.csv";
+    const out = await fetchAttachments("tok", text, fetchImpl as unknown as typeof fetch);
+    expect(out.map((a) => a.mediaType)).toEqual(["image/png", "application/pdf"]);
+    expect(out[1].filename).toBe("b.pdf");
   });
 });
