@@ -123,8 +123,10 @@ const ISSUE_DOCS_QUERY =
 const DOC_BY_SLUG_QUERY = `query($slug: String!) { documents(filter: { slugId: { eq: $slug } }, first: 1) { nodes { id title content } } }`;
 
 /** Render the injected block. Full docs are emitted until the cap; the doc that
- *  overflows is cut with a marker naming its id, and any later full docs fall to
- *  the index. Project docs not already shown appear as one-line index entries. */
+ *  overflows is cut with a marker naming its id, and once the cap is exhausted
+ *  every later full doc likewise gets a header + get_document("<id>") marker
+ *  entry (not moved to the index). Project docs not shown in full or as a marker
+ *  appear as one-line index entries. */
 export function renderDocContext(bundle: IssueDocsBundle, cap: number = DOC_CONTEXT_CAP): string | undefined {
   const shownIds = new Set<string>();
   const sections: string[] = [];
@@ -135,6 +137,7 @@ export function renderDocContext(bundle: IssueDocsBundle, cap: number = DOC_CONT
     const remaining = cap - used - header.length;
     if (remaining <= 0) {
       sections.push(`${header}[truncated — full doc: get_document("${id}")]`);
+      used = cap;
       return;
     }
     if (content.length > remaining) {

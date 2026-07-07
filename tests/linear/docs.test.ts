@@ -87,6 +87,19 @@ describe("renderDocContext", () => {
   it("returns undefined when there is nothing to inject", () => {
     expect(renderDocContext({ fullDocs: [], projectContent: null, projectDocIndex: [] })).toBeUndefined();
   });
+  it("cuts a later doc too once the cap is exhausted (monotonic)", () => {
+    const big = "y".repeat(DOC_CONTEXT_CAP + 500);
+    const out = renderDocContext({
+      fullDocs: [
+        { id: "dFirst", title: "First", content: big },
+        { id: "dSecond", title: "S", content: "second body should not appear in full" },
+      ],
+      projectContent: null,
+      projectDocIndex: [],
+    })!;
+    expect(out).toContain('get_document("dSecond")');
+    expect(out).not.toContain("second body should not appear in full");
+  });
 });
 
 describe("assembleDocContext", () => {
