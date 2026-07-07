@@ -38,9 +38,15 @@ async function gql<T>(
       { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ query, variables }) },
       token, fetchImpl, onUnauthorized,
     );
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.error(`[docs] gql non-200 (advisory): ${res.status}`);
+      return null;
+    }
     const json = (await res.json()) as { data?: T; errors?: unknown };
-    if (json.errors || !json.data) return null;
+    if (json.errors || !json.data) {
+      console.error(`[docs] gql error (advisory): ${JSON.stringify(json.errors).slice(0, 200)}`);
+      return null;
+    }
     return json.data;
   } catch (err) {
     console.error(`[docs] gql failed (advisory): ${err instanceof Error ? err.message : String(err)}`);
