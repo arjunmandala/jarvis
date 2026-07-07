@@ -226,7 +226,9 @@ per-run content, so prompt-cache-safe; (2) the newest 10 prior runs' raw
 `/home/user/jarvis-history/run-<id>-<taskType>.jsonl` and the goal tells the
 agent to Grep them on demand. Advisory end-to-end: any failure logs
 `[history]` and the run proceeds memory-less. `// ponytail:` same-issue scope
-only; upgrade path for cross-issue memory is a host-side retrieval tool.
+only; upgrade path for cross-issue memory is a cross-issue retrieval tool on
+the docs MCP server (`src/mcp/docs-server.ts`) — the realized host-side channel
+that `get_thread`/`get_run_events` already use.
 
 ### Agent tasks (`src/agent/tasks.ts`)
 

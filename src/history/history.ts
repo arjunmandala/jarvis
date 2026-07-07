@@ -88,8 +88,9 @@ export function renderHistory(thread: string | null, files: string[], olderRunsE
 }
 
 // ponytail: same-issue scope only — history never crosses issues. Upgrade
-// path if scope ever widens: a host-side retrieval tool (cross-issue search),
-// not more goal injection.
+// path if scope ever widens: a cross-issue retrieval tool on the host-side
+// docs MCP server (src/mcp/docs-server.ts) — the same channel get_thread/
+// get_run_events already use — not more goal injection.
 /**
  * The one-call entry point for the orchestrator: gather this issue's prior
  * sessions, fetch their visible threads, export their run logs into the
