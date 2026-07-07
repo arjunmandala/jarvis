@@ -140,6 +140,18 @@ if (wantsSerena && existsSync(SERENA_BIN)) {
   };
 }
 
+// Docs MCP (Linear docs / thread / prior run events over streamable HTTP).
+// The host passes a per-run bearer token; the Linear OAuth token never enters
+// the sandbox. ponytail: presence check only — no docsMcp, no registration, and
+// the agent simply lacks the tools (advisory), never a crash.
+if (task.docsMcp?.url && task.docsMcp?.token) {
+  mcpServers.docs = {
+    type: "http",
+    url: task.docsMcp.url,
+    headers: { Authorization: `Bearer ${task.docsMcp.token}` },
+  };
+}
+
 let lastResult = null;
 // Cumulative token usage across every assistant turn. The SDK's result.usage is
 // only the FINAL turn's snapshot, which badly undercounts a multi-turn run —
