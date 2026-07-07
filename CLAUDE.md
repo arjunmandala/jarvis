@@ -249,10 +249,11 @@ goal text, model, and turn cap, not the tool list:
 | `implementTask()` | sonnet-5 **or** opus-4-8 (routed) | 120 | agreed plan → code, tests, push, `gh pr create`; final message must be exactly the PR URL, or `PR_FAILED: <reason>`. Takes an optional `workBranch`: when set (a resumed run), it pins that branch (`git checkout -B <workBranch> origin/<workBranch> \|\| git checkout -b <workBranch>`) instead of branching fresh, and pushes after each meaningful step rather than once at the end, so a mid-run death leaves recoverable work on the remote |
 | `reviewTask()` | sonnet-5 | 40 | self-review of big diffs + on-demand PR review; final message = the report |
 
-Every task can carry `images`: screenshots pasted into Linear arrive as markdown
-links to `uploads.linear.app`, downloaded host-side by `fetchImageAttachments`
-(`src/linear/attachments.ts`, capped at 5 images / 5 MB each, advisory — a failed
-download is skipped, never thrown) and passed to the agent as image content blocks.
+Every task can carry `images`: screenshots and files pasted into Linear arrive as
+markdown links to `uploads.linear.app`, downloaded host-side by `fetchAttachments`
+(`src/linear/attachments.ts`, capped at 5 attachments / 5 MB each, advisory — a failed
+download is skipped, never thrown), routed by content type (`routeAttachment`), and
+passed to the agent as image content blocks or task file input as appropriate.
 
 Each task also carries an `effort` hint (`map`=low, `plan`/`revise`/`review`=medium,
 `implement`=high) — the Agent SDK default is `high`; lowering it on bounded tasks cuts

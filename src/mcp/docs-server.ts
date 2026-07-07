@@ -9,8 +9,11 @@ export interface RunTokenClaims { agentSessionId: string; issueId: string | null
 
 // The host mints a random bearer token per agent run, held only in memory (like
 // the orchestrator's #live map) and revoked when the run finishes. The Linear
-// OAuth token never enters the sandbox; a token resolves only to its run's
-// issue, so a compromised sandbox can at worst read that issue's docs/thread/runs.
+// OAuth token never enters the sandbox. `get_thread`/`get_run_events` are
+// strictly issue-scoped (SQL-joined to the run's issue) — a token cannot read
+// another issue's threads/runs. `search_documents`/`get_document` are
+// workspace-scoped by design (that's the feature): a compromised sandbox can
+// read any workspace document, read-only, for the run's lifetime.
 export class RunTokenRegistry {
   #tokens = new Map<string, RunTokenClaims>();
   mint(claims: RunTokenClaims): string {

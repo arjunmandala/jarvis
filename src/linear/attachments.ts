@@ -9,7 +9,6 @@ export const MAX_ATTACHMENTS = 5;
 export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 
 export interface FileAttachment { url: string; filename: string; mediaType: string; data: string }
-export interface ImageAttachment { mediaType: string; data: string }
 
 /** Every distinct uploads.linear.app URL in `text`, capped. */
 export function extractAttachmentUrls(text: string): string[] {
@@ -21,17 +20,18 @@ export function extractAttachmentUrls(text: string): string[] {
   return urls.slice(0, MAX_ATTACHMENTS);
 }
 
-// Image-only extraction: used by fetchImageAttachments so the 5-item cap
-// applies to images alone, not to a mix of images/files/bare URLs.
-const IMAGE_MD_RE = /!\[[^\]]*\]\((https:\/\/uploads\.linear\.app\/[^)]+)\)/g;
-export function extractImageUrls(text: string): string[] {
-  const urls: string[] = [];
-  for (const m of text.matchAll(IMAGE_MD_RE)) if (!urls.includes(m[1])) urls.push(m[1]);
-  return urls.slice(0, MAX_ATTACHMENTS);
-}
-
 function filenameOf(url: string): string {
-  try { return decodeURIComponent(new URL(url).pathname.split("/").pop() || "file"); } catch { return "file"; }
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(new URL(url).pathname.split("/").pop() || "file");
+  } catch {
+    return "file";
+  }
+  // A path segment containing an encoded separator (%2f) or dot-dot (%2e%2e)
+  // decodes to "/" or ".." — sanitize so `${ATTACHMENTS_DIR}/${filename}` can
+  // never escape the attachments dir.
+  const safe = decoded.replace(/[/\\]/g, "_").replace(/\.\./g, "_");
+  return safe === "" || safe === "." ? "file" : safe;
 }
 
 /** Download a given list of URLs; advisory — a failed/oversized download is skipped. */
@@ -73,18 +73,4 @@ export function routeAttachment(a: FileAttachment): AttachmentKind {
   if (a.mediaType === "application/pdf") return "pdf";
   if (a.mediaType.startsWith("text/") || a.mediaType === "application/json" || a.mediaType.includes("csv")) return "text";
   return "binary";
-}
-
-/** Back-compat wrapper: image content blocks only (used by callers that only
- *  want vision). Uses the image-only URL extraction so the 5-item cap applies
- *  to images alone, not to a mix of images/files/bare URLs; the routeAttachment
- *  filter is a defensive guard against a non-image content-type on an ![]() link. */
-export async function fetchImageAttachments(
-  token: TokenSource,
-  text: string,
-  fetchImpl: typeof fetch = fetch,
-  onUnauthorized?: () => Promise<string>,
-): Promise<ImageAttachment[]> {
-  const all = await downloadAttachments(extractImageUrls(text), token, fetchImpl, onUnauthorized);
-  return all.filter((a) => routeAttachment(a) === "image").map((a) => ({ mediaType: a.mediaType, data: a.data }));
 }
