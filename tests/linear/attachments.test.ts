@@ -68,6 +68,16 @@ describe("fetchImageAttachments", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("returns all 5 images even when a preceding non-image attachment link is present (image-only cap, not mixed-attachment cap)", async () => {
+    const fetchImpl = vi.fn(async (url: string) => (url.endsWith(".pdf") ? imgResponse(4, "application/pdf") : imgResponse(4, "image/png")));
+    const text =
+      "[r](https://uploads.linear.app/r.pdf) " +
+      Array.from({ length: 5 }, (_, i) => `![img${i}](https://uploads.linear.app/${i}.png)`).join(" ");
+    const out = await fetchImageAttachments("token-1", text, fetchImpl as unknown as typeof fetch);
+    expect(out).toHaveLength(5);
+    expect(out.every((a) => a.mediaType === "image/png")).toBe(true);
+  });
+
   it("on a 401, refreshes and retries the download with the fresh token", async () => {
     const fetchImpl = vi
       .fn()

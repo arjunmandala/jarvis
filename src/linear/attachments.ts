@@ -21,7 +21,8 @@ export function extractAttachmentUrls(text: string): string[] {
   return urls.slice(0, MAX_ATTACHMENTS);
 }
 
-// Back-compat: image-only extraction still used where only vision blocks matter.
+// Image-only extraction: used by fetchImageAttachments so the 5-item cap
+// applies to images alone, not to a mix of images/files/bare URLs.
 const IMAGE_MD_RE = /!\[[^\]]*\]\((https:\/\/uploads\.linear\.app\/[^)]+)\)/g;
 export function extractImageUrls(text: string): string[] {
   const urls: string[] = [];
@@ -33,15 +34,15 @@ function filenameOf(url: string): string {
   try { return decodeURIComponent(new URL(url).pathname.split("/").pop() || "file"); } catch { return "file"; }
 }
 
-/** Download all attachments; advisory — a failed/oversized download is skipped. */
-export async function fetchAttachments(
+/** Download a given list of URLs; advisory — a failed/oversized download is skipped. */
+async function downloadAttachments(
+  urls: string[],
   token: TokenSource,
-  text: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch,
   onUnauthorized?: () => Promise<string>,
 ): Promise<FileAttachment[]> {
   const out: FileAttachment[] = [];
-  for (const url of extractAttachmentUrls(text)) {
+  for (const url of urls) {
     try {
       const r = await fetchWithAuth(url, {}, token, fetchImpl, onUnauthorized);
       if (!r.ok) continue;
@@ -56,6 +57,16 @@ export async function fetchAttachments(
   return out;
 }
 
+/** Download all attachments; advisory — a failed/oversized download is skipped. */
+export async function fetchAttachments(
+  token: TokenSource,
+  text: string,
+  fetchImpl: typeof fetch = fetch,
+  onUnauthorized?: () => Promise<string>,
+): Promise<FileAttachment[]> {
+  return downloadAttachments(extractAttachmentUrls(text), token, fetchImpl, onUnauthorized);
+}
+
 export type AttachmentKind = "image" | "pdf" | "text" | "binary";
 export function routeAttachment(a: FileAttachment): AttachmentKind {
   if (a.mediaType.startsWith("image/")) return "image";
@@ -65,13 +76,15 @@ export function routeAttachment(a: FileAttachment): AttachmentKind {
 }
 
 /** Back-compat wrapper: image content blocks only (used by callers that only
- *  want vision). Delegates to fetchAttachments + the image router. */
+ *  want vision). Uses the image-only URL extraction so the 5-item cap applies
+ *  to images alone, not to a mix of images/files/bare URLs; the routeAttachment
+ *  filter is a defensive guard against a non-image content-type on an ![]() link. */
 export async function fetchImageAttachments(
   token: TokenSource,
   text: string,
   fetchImpl: typeof fetch = fetch,
   onUnauthorized?: () => Promise<string>,
 ): Promise<ImageAttachment[]> {
-  const all = await fetchAttachments(token, text, fetchImpl, onUnauthorized);
+  const all = await downloadAttachments(extractImageUrls(text), token, fetchImpl, onUnauthorized);
   return all.filter((a) => routeAttachment(a) === "image").map((a) => ({ mediaType: a.mediaType, data: a.data }));
 }
