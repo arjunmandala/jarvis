@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Jarvis is a coding agent for the company: a Linear issue gets assigned to Jarvis;
+Jarvis is a coding agent: a Linear issue gets assigned to Jarvis;
 it clarifies, posts a plan, and once you agree writes code, tests it in an E2B sandbox,
-and opens a GitHub PR for a human to merge. Full design/rationale: [`BUILD_PLAN.md`](./BUILD_PLAN.md).
+and opens a GitHub PR for a human to merge.
 
 Jarvis does not reimplement a planner, debugger, or
 review engine. It wires together the Claude Agent SDK (the autonomous loop), the

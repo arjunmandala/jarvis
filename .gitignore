@@ -1,9 +1,27 @@
+# dependencies / build
 node_modules/
 dist/
+coverage/
+
+# secrets and local config
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+credentials*.json
+.npmrc
+
+# local data
 *.db
 *.db-journal
+*.sqlite
+jarvis-report.html
+
+# tooling / OS
 .superpowers/
 .tools/
-jarvis-report.html
+*.log
+.DS_Store
 push-to-github.ps1
