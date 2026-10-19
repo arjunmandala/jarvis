@@ -1,5 +1,7 @@
 # Jarvis
 
+<p align="center"><img src="assets/banner.png" alt="Jarvis" width="720"></p>
+
 A coding agent that works from Linear. Assign a Linear issue to Jarvis and it
 talks the issue through with you, posts a plan, and once you agree, writes the
 code and tests it in an isolated E2B sandbox, then opens a GitHub pull request.
